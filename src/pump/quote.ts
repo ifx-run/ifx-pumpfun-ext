@@ -55,7 +55,7 @@ async function quoteBuy(
     serviceFeeRaw: fee.toString(),
     serviceFeeLabel: token.quoteLabel,
     netQuoteRaw: netQuote.toString(),
-    route: ["service_fee", "pump.buy_exact_quote_in_v2"],
+    route: ["service_fee", "pump.buy_exact_quote_in_v2", "ifx.close_ata?"],
     ixKind: "buy_exact_quote_in_v2",
   };
 }
@@ -128,6 +128,7 @@ async function quoteSwap(
     netQuoteRaw: netQuote.toString(),
     route: [
       "pump.sell_v2",
+      "ifx.close_ata?",
       "service_fee",
       "ifx.let",
       "pump.buy_exact_quote_in_v2.patched",

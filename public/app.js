@@ -16,6 +16,12 @@ let walletPubkey = null;
 
 const BLOCKHASH_RETRIES = 3;
 
+function logClientError(phase, err, context) {
+  console.error(`[ifx-pumpfun] ${phase}`, err);
+  if (context) console.error(`[ifx-pumpfun] ${phase} context`, context);
+  if (err?.stack) console.error(err.stack);
+}
+
 function getWalletProvider() {
   if (window.solana?.isPhantom) return window.solana;
   if (window.solflare?.isSolflare) return window.solflare;
@@ -88,6 +94,7 @@ async function api(path, body) {
       typeof data.error === "string" ? data.error : JSON.stringify(data.error ?? res.statusText)
     );
     err.status = res.status;
+    logClientError(`api ${path}`, err, { status: res.status, body });
     throw err;
   }
   return data;
@@ -247,6 +254,7 @@ async function doBuildSign() {
     try {
       built = await buildTransaction(buildBody);
     } catch (e) {
+      logClientError("build", e, { buildBody, attempt, quoteSnapshot: lastQuoteSnapshot });
       renderBuildProgress(e.message, "error");
       return;
     }
@@ -269,6 +277,12 @@ async function doBuildSign() {
         renderBuildProgress("Transaction cancelled.", "muted");
         return;
       }
+      logClientError("sign-send", e, {
+        attempt,
+        feePayer: built?.feePayer,
+        frameUsed: built?.frameUsed,
+        txBytes: built?.transaction?.length,
+      });
       renderBuildProgress(e.message ?? String(e), "error");
       return;
     }
@@ -331,6 +345,7 @@ async function doResolve() {
     out.className = "resolve-out";
     scheduleQuote();
   } catch (e) {
+    logClientError("resolve", e, { mintA, mintB });
     resolveState = null;
     out.textContent = e.message;
     out.className = "resolve-out error";
@@ -404,6 +419,7 @@ async function doQuote() {
     updateBuildBtn();
   } catch (e) {
     if (e.name === "AbortError") return;
+    logClientError("quote", e, body);
     out.textContent = e.message;
     out.className = "quote-out error";
   }

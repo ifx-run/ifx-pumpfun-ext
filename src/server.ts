@@ -11,6 +11,7 @@ import { buildTradeTransaction } from "./ifx/build.js";
 import { PumpContext } from "./pump/context.js";
 import { resolveTokens } from "./pump/resolve.js";
 import { quoteTrade } from "./pump/quote.js";
+import { errorMessage, logRouteError } from "./util/log-error.js";
 
 const resolveBody = z.object({
   mintA: z.string().min(32),
@@ -88,8 +89,11 @@ export async function buildApp() {
         parsed.data.userPubkey
       );
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return reply.code(400).send({ error: msg });
+      logRouteError(req.log, "POST /api/token/resolve", e, {
+        mintA: parsed.data.mintA,
+        mintB: parsed.data.mintB,
+      });
+      return reply.code(400).send({ error: errorMessage(e) });
     }
   });
 
@@ -108,8 +112,8 @@ export async function buildApp() {
           parsed.data.slippageBps ?? config.quote.defaultSlippageBps,
       });
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return reply.code(400).send({ error: msg });
+      logRouteError(req.log, "POST /api/quote", e, parsed.data);
+      return reply.code(400).send({ error: errorMessage(e) });
     }
   });
 
@@ -133,8 +137,16 @@ export async function buildApp() {
         priorityTier: tier,
       });
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return reply.code(400).send({ error: msg });
+      logRouteError(req.log, "POST /api/tx/build", e, {
+        mode: parsed.data.mode,
+        side: parsed.data.side,
+        mintA: parsed.data.mintA,
+        mintB: parsed.data.mintB,
+        userPubkey: parsed.data.userPubkey,
+        priorityTier: tier,
+        ixKind: parsed.data.quoteSnapshot?.ixKind,
+      });
+      return reply.code(400).send({ error: errorMessage(e) });
     }
   });
 

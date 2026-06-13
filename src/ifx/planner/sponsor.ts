@@ -16,6 +16,7 @@ import {
 } from "@solana/web3.js";
 
 import type { AtaSpec } from "../../sponsor/ata-specs.js";
+import { asIfxLetAccount } from "../let-account.js";
 
 export type { AtaSpec } from "../../sponsor/ata-specs.js";
 
@@ -68,7 +69,7 @@ export function appendSponsorAtaBootstrap(
 
   const baseline = scratch.letBuilder();
   const befores = specs.map((s) =>
-    baseline.lamports(userAta(user, s.mint, s.tokenProgram))
+    baseline.lamports(asIfxLetAccount(userAta(user, s.mint, s.tokenProgram)))
   );
   out.push(baseline.buildIx());
 
@@ -81,7 +82,7 @@ export function appendSponsorAtaBootstrap(
   for (let i = 0; i < specs.length; i++) {
     const spec = specs[i]!;
     const afterLamports = after.lamports(
-      userAta(user, spec.mint, spec.tokenProgram)
+      asIfxLetAccount(userAta(user, spec.mint, spec.tokenProgram))
     );
     const delta = after.letEval(expr.sub(afterLamports, befores[i]!));
     total = after.letEval(expr.add(total, delta));

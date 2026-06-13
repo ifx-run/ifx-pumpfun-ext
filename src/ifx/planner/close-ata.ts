@@ -2,11 +2,13 @@ import { arm, expr, ifElseArgs, staticCpi, type FrameScratch } from "@ifx-run/sd
 import { createCloseAccountInstruction } from "@solana/spl-token";
 import { PublicKey, TransactionInstruction } from "@solana/web3.js";
 
+import { asIfxLetAccount } from "../let-account.js";
+
 const TOKEN_2022_PROGRAM_ID = new PublicKey(
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 );
 
-/** Close base-token ATA when balance is zero after sell. */
+/** Close a hop input token account when its balance is zero after the hop. */
 export function appendConditionalCloseAta(
   scratch: FrameScratch,
   out: TransactionInstruction[],
@@ -16,10 +18,11 @@ export function appendConditionalCloseAta(
   tokenProgram: PublicKey
 ): void {
   const letBatch = scratch.letBuilder();
+  const tokenRef = asIfxLetAccount(tokenAccount);
   const is2022 = tokenProgram.equals(TOKEN_2022_PROGRAM_ID);
   const balance = is2022
-    ? letBatch.splToken2022Amount(tokenAccount)
-    : letBatch.splTokenAmount(tokenAccount);
+    ? letBatch.splToken2022Amount(tokenRef)
+    : letBatch.splTokenAmount(tokenRef);
   out.push(letBatch.buildIx());
 
   const close = staticCpi(

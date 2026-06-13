@@ -45,7 +45,22 @@ import {
   computeInputLimit,
   fetchWalletBalances,
 } from "../wallet/balances.js";
+import { assertTransactionSize } from "../util/transaction-size.js";
+import { logError } from "../util/log-error.js";
 import type { BuildTxRequest, BuildTxResponse, QuoteResponse, QuoteSnapshot } from "../types/api.js";
+
+async function runBuildPhase<T>(
+  phase: string,
+  fn: () => Promise<T>,
+  context?: Record<string, unknown>
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    logError(`tx/build:${phase}`, err, context);
+    throw err;
+  }
+}
 
 function priorityIxs(config: AppConfig, tier: PriorityTier): TransactionInstruction[] {
   const { microLamports, computeUnitLimit } = config.priorityFee[tier];
@@ -117,10 +132,14 @@ async function finalizeTx(
     partiallySignedBy = [sponsor.pubkey.toBase58()];
   }
 
+  const serialized = tx.serialize({
+    requireAllSignatures: false,
+    verifySignatures: false,
+  });
+  assertTransactionSize(serialized);
+
   return {
-    transaction: tx
-      .serialize({ requireAllSignatures: false, verifySignatures: false })
-      .toString("base64"),
+    transaction: serialized.toString("base64"),
     recentBlockhash: blockhash,
     frameUsed: framePubkey,
     lastValidBlockHeight,
@@ -279,6 +298,17 @@ async function buildSingleHopTransaction(
         associatedBaseUser: baseAta,
       })
     );
+
+    const buyCloseIxs: TransactionInstruction[] = [];
+    appendConditionalCloseAta(
+      scratch,
+      buyCloseIxs,
+      quoteAtaPk,
+      user,
+      user,
+      accounts.quoteTokenProgram
+    );
+    tx.add(...buyCloseIxs);
   } else {
     tx.add(
       await sellV2Instruction({
@@ -353,19 +383,41 @@ export async function buildTradeTransaction(
   config: AppConfig,
   req: BuildTradeParams
 ): Promise<BuildTxResponse> {
-  const quote = await resolveQuoteForBuild(pump, config, req);
+  const buildCtx = {
+    mode: req.mode,
+    side: req.side,
+    mintA: req.mintA,
+    mintB: req.mintB,
+    userPubkey: req.userPubkey,
+    priorityTier: req.priorityTier,
+    ixKind: req.quoteSnapshot?.ixKind,
+  };
+
+  const quote = await runBuildPhase(
+    "resolveQuote",
+    () => resolveQuoteForBuild(pump, config, req),
+    buildCtx
+  );
 
   const user = new PublicKey(req.userPubkey);
   const side = req.side ?? "buy";
   const needsBase = req.mode === "swap" || side === "sell";
-  const resolved = await resolveTokens(pump, config, req.mintA, req.mintB);
-  const wallet =
-    (await fetchWalletBalances(
-      pump.connection,
-      config,
-      user,
-      needsBase ? resolved.tokenA : undefined
-    ));
+  const resolved = await runBuildPhase(
+    "resolveTokens",
+    () => resolveTokens(pump, config, req.mintA, req.mintB),
+    buildCtx
+  );
+  const wallet = await runBuildPhase(
+    "fetchWalletBalances",
+    () =>
+      fetchWalletBalances(
+        pump.connection,
+        config,
+        user,
+        needsBase ? resolved.tokenA : undefined
+      ),
+    buildCtx
+  );
   const limit = computeInputLimit({
     mode: req.mode,
     side,
@@ -378,21 +430,39 @@ export async function buildTradeTransaction(
     throw new Error(limit.hint ?? "input exceeds wallet balance");
   }
 
-  const bootstrapSpecs = await resolveBootstrapAtaSpecs(pump, config, {
-    mode: req.mode,
-    side: req.side,
-    mintA: req.mintA,
-    mintB: req.mintB,
-  });
-  const sponsor = await resolveSponsorPlan(pump.connection, config, {
-    quoteLabel: quote.serviceFeeLabel,
-    priorityTier: req.priorityTier,
-    user,
-    bootstrapSpecs,
-  });
+  const bootstrapSpecs = await runBuildPhase(
+    "resolveBootstrapAtaSpecs",
+    () =>
+      resolveBootstrapAtaSpecs(pump, config, {
+        mode: req.mode,
+        side: req.side,
+        mintA: req.mintA,
+        mintB: req.mintB,
+      }),
+    buildCtx
+  );
+  const sponsor = await runBuildPhase(
+    "resolveSponsorPlan",
+    () =>
+      resolveSponsorPlan(pump.connection, config, {
+        quoteLabel: quote.serviceFeeLabel,
+        priorityTier: req.priorityTier,
+        user,
+        bootstrapSpecs,
+      }),
+    { ...buildCtx, sponsorEnabled: config.sponsor.enabled }
+  );
 
   if (req.mode === "swap") {
-    return buildSwapTransaction(pump, config, req, quote, sponsor);
+    return runBuildPhase(
+      "assembleSwapTx",
+      () => buildSwapTransaction(pump, config, req, quote, sponsor),
+      buildCtx
+    );
   }
-  return buildSingleHopTransaction(pump, config, req, quote, sponsor);
+  return runBuildPhase(
+    "assembleSingleHopTx",
+    () => buildSingleHopTransaction(pump, config, req, quote, sponsor),
+    { ...buildCtx, side }
+  );
 }

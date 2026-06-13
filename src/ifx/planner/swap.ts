@@ -32,6 +32,7 @@ import { minOutRaw } from "../../util/amount.js";
 import type { SponsorPlan } from "../../sponsor/plan.js";
 import { swapHop2AtaSpecs } from "../../sponsor/ata-specs.js";
 import { appendConditionalCloseAta } from "./close-ata.js";
+import { asIfxLetAccount } from "../let-account.js";
 import {
   appendSponsorAtaBootstrap,
   appendSponsorRepayTransfer,
@@ -78,7 +79,7 @@ function patchedTokenTransfer(
   );
 }
 
-/** A → quote → B: sell hop1, on-chain fee, patched buy hop2, optional close A ATA. */
+/** A → quote → B: sell hop1, close A input ATA, fee, patched buy hop2, close quote input ATA. */
 export async function appendSwapInstructions(
   out: TransactionInstruction[],
   params: SwapBuildParams
@@ -138,8 +139,8 @@ export async function appendSwapInstructions(
   const baselineBatch = scratch.letBuilder();
   const quoteBefore =
     quoteLabel === "SOL"
-      ? baselineBatch.lamports(user)
-      : baselineBatch.splTokenAmount(quoteAtaPk);
+      ? baselineBatch.lamports(asIfxLetAccount(user))
+      : baselineBatch.splTokenAmount(asIfxLetAccount(quoteAtaPk));
   out.push(baselineBatch.buildIx());
 
   out.push(
@@ -156,11 +157,20 @@ export async function appendSwapInstructions(
     })
   );
 
+  appendConditionalCloseAta(
+    scratch,
+    out,
+    baseAAta,
+    user,
+    user,
+    accountsA.baseTokenProgram
+  );
+
   const afterSell = scratch.letBuilder();
   const quoteAfter =
     quoteLabel === "SOL"
-      ? afterSell.lamports(user)
-      : afterSell.splTokenAmount(quoteAtaPk);
+      ? afterSell.lamports(asIfxLetAccount(user))
+      : afterSell.splTokenAmount(asIfxLetAccount(quoteAtaPk));
   const quoteDelta = afterSell.letEval(expr.sub(quoteAfter, quoteBefore));
   const fee = afterSell.letEval(
     expr.bpsMulFloor(quoteDelta, expr.u64(serviceFeeBps))
@@ -256,10 +266,10 @@ export async function appendSwapInstructions(
   appendConditionalCloseAta(
     scratch,
     out,
-    baseAAta,
+    quoteAtaPk,
     user,
     user,
-    accountsA.baseTokenProgram
+    quoteTokenProgram
   );
 }
 

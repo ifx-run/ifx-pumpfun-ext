@@ -25,14 +25,26 @@ const INACTIVE_PUBKEY = new PublicKey(
   "11111111111111111111111111111111"
 );
 
+function configPubkeyOrNull(value: string | undefined): PublicKey | null {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed.includes("REPLACE_WITH")) return null;
+  try {
+    return new PublicKey(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+function configPubkeyOrDefault(value: string | undefined): PublicKey {
+  return configPubkeyOrNull(value) ?? INACTIVE_PUBKEY;
+}
+
 export function applyRepayBuffer(settle: bigint, bufferPercent: number): bigint {
   return (settle * BigInt(100 + bufferPercent)) / 100n;
 }
 
 export function inactiveSponsorPlan(config: AppConfig): SponsorPlan {
-  const pubkey = config.sponsor.pubkey
-    ? new PublicKey(config.sponsor.pubkey)
-    : INACTIVE_PUBKEY;
+  const pubkey = configPubkeyOrDefault(config.sponsor.pubkey);
   return {
     active: false,
     pubkey,
@@ -61,6 +73,10 @@ export async function resolveSponsorPlan(
   if (!config.sponsor.pubkey || !config.sponsor.keypairPath) {
     return base;
   }
+  const sponsorPubkey = configPubkeyOrNull(config.sponsor.pubkey);
+  if (!sponsorPubkey) {
+    return base;
+  }
 
   const missingAtaRentLamports = await sumMissingAtaRent(
     connection,
@@ -80,7 +96,7 @@ export async function resolveSponsorPlan(
 
   return {
     active: true,
-    pubkey: new PublicKey(config.sponsor.pubkey),
+    pubkey: sponsorPubkey,
     settleLamports,
     repayLamports,
     txFeeLamports,
