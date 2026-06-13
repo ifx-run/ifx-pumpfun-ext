@@ -13,5 +13,24 @@
   "engines": {
     "node": ">=20"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.31.1",
+    "@fastify/cors": "^11.2.0",
+    "@fastify/static": "^9.1.3",
+    "@ifx-run/sdk": "file:../ifx/sdk",
+    "@pump-fun/pump-sdk": "^1.36.0",
+    "@solana/spl-token": "^0.4.14",
+    "@solana/web3.js": "^1.98.4",
+    "bn.js": "^5.2.3",
+    "fastify": "^5.8.5",
+    "smol-toml": "^1.6.1",
+    "tsx": "^4.22.4",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/bn.js": "^5.2.0",
+    "@types/node": "^25.9.3",
+    "typescript": "^6.0.3"
+  }
 }

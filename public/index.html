@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pump × Ifx Showcase</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "@solana/web3.js": "https://esm.sh/@solana/web3.js@1.98.4"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <main class="wrap">
+      <header>
+        <h1>Pump × Ifx Showcase</h1>
+        <p class="sub">Exact-input quotes · quote-only service fee</p>
+      </header>
+
+      <section class="card wallet-bar">
+        <div id="walletStatus" class="wallet-status muted">Wallet not connected</div>
+        <div class="wallet-actions">
+          <button id="connectBtn" type="button" class="secondary">Connect wallet</button>
+          <button id="disconnectBtn" type="button" class="secondary hidden">Disconnect</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <label class="row">
+          <span>Mode</span>
+          <select id="mode">
+            <option value="trade">Trade</option>
+            <option value="swap">Swap A → B</option>
+          </select>
+        </label>
+
+        <label class="row">
+          <span>Token A mint</span>
+          <input id="mintA" type="text" placeholder="Base58 mint" />
+        </label>
+
+        <label class="row swap-only hidden">
+          <span>Token B mint</span>
+          <input id="mintB" type="text" placeholder="Base58 mint" />
+        </label>
+
+        <div id="resolveOut" class="resolve-out muted"></div>
+
+        <label class="row trade-only">
+          <span>Side</span>
+          <select id="side">
+            <option value="buy">Buy</option>
+            <option value="sell">Sell</option>
+          </select>
+        </label>
+
+        <label class="row">
+          <span id="inputLabel">You pay (quote)</span>
+          <input id="inputAmount" type="text" inputmode="decimal" placeholder="0.0" />
+        </label>
+
+        <label class="row">
+          <span>Slippage %</span>
+          <input id="slippage" type="number" min="0" max="50" step="0.1" value="1" />
+        </label>
+
+        <label class="row">
+          <span>Priority</span>
+          <select id="priorityTier">
+            <option value="low">Low</option>
+            <option value="medium" selected>Medium</option>
+            <option value="high">High</option>
+          </select>
+        </label>
+
+        <div id="quoteOut" class="quote-out muted">Enter amount to quote.</div>
+
+        <button id="quoteBtn" type="button">Quote now</button>
+
+        <button id="buildSignBtn" type="button" disabled>Build &amp; sign</button>
+        <div id="buildOut" class="quote-out muted">
+          Connect wallet, quote, then build &amp; sign. Build uses frozen quote amounts (no re-quote).
+        </div>
+      </section>
+    </main>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

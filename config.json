@@ -25,11 +25,11 @@
   },
   "serviceFee": {
     "bps": 5,
-    "pubkey": "YourFeeRecipientPubkey..."
+    "pubkey": "REPLACE_WITH_FEE_RECIPIENT_PUBKEY"
   },
   "sponsor": {
     "enabled": false,
-    "pubkey": "YourSponsorPubkey...",
+    "pubkey": "REPLACE_WITH_SPONSOR_PUBKEY",
     "keypairPath": "./keys/sponsor.json",
     "minUserSolLamports": 5000000,
     "repayBufferPercent": 10,

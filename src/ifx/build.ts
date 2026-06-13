@@ -1,0 +1,366 @@
+import {
+  ComputeBudgetProgram,
+  PublicKey,
+  Transaction,
+  TransactionInstruction,
+} from "@solana/web3.js";
+import { NATIVE_MINT } from "@solana/spl-token";
+
+import type { AppConfig, PriorityTier } from "../config/types.js";
+import { loadKeypairFromFile } from "../config/keypair.js";
+import { appendConditionalCloseAta } from "../ifx/planner/close-ata.js";
+import {
+  appendSwapInstructions,
+  sellMinQuoteForSwap,
+} from "../ifx/planner/swap.js";
+import {
+  serviceFeeTransferIx,
+  serviceFeeTransferIxAfterSolSell,
+} from "../ifx/planner/service-fee.js";
+import {
+  appendSponsorAtaBootstrap,
+  appendSponsorRepay,
+  type AtaSpec,
+} from "../ifx/planner/sponsor.js";
+import { scratchForBuild } from "../ifx/frames.js";
+import { loadTokenBuildAccounts } from "../pump/accounts.js";
+import type { PumpContext } from "../pump/context.js";
+import { quoteTrade } from "../pump/quote.js";
+import { resolveTokens } from "../pump/resolve.js";
+import {
+  buyExactQuoteInV2Instruction,
+  idempotentAtaCreate,
+  isNativeQuoteMint,
+  sellV2Instruction,
+  userBaseAta,
+  userQuoteAta,
+  wrapSolIxs,
+} from "../pump/instructions.js";
+import { resolveSponsorPlan, type SponsorPlan } from "../sponsor/plan.js";
+import type { BuildTxRequest, BuildTxResponse, QuoteResponse, QuoteSnapshot } from "../types/api.js";
+
+function priorityIxs(config: AppConfig, tier: PriorityTier): TransactionInstruction[] {
+  const { microLamports, computeUnitLimit } = config.priorityFee[tier];
+  return [
+    ComputeBudgetProgram.setComputeUnitLimit({ units: computeUnitLimit }),
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports }),
+  ];
+}
+
+export type BuildTradeParams = BuildTxRequest & {
+  priorityTier: PriorityTier;
+};
+
+function quoteFromSnapshot(snapshot: QuoteSnapshot): QuoteResponse {
+  return {
+    inputRaw: snapshot.inputRaw,
+    inputLabel: snapshot.inputLabel,
+    expectedOutputRaw: snapshot.minOutputRaw,
+    expectedOutputUi: "",
+    minOutputRaw: snapshot.minOutputRaw,
+    serviceFeeRaw: snapshot.serviceFeeRaw,
+    serviceFeeLabel: snapshot.serviceFeeLabel,
+    netQuoteRaw: snapshot.netQuoteRaw,
+    route: [],
+    ixKind: snapshot.ixKind,
+  };
+}
+
+async function resolveQuoteForBuild(
+  pump: PumpContext,
+  config: AppConfig,
+  req: BuildTradeParams
+): Promise<QuoteResponse> {
+  if (req.quoteSnapshot) {
+    return quoteFromSnapshot(req.quoteSnapshot);
+  }
+  return quoteTrade(pump, config, {
+    mode: req.mode,
+    side: req.side,
+    mintA: req.mintA,
+    mintB: req.mintB,
+    inputAmount: req.inputAmount,
+    slippageBps: req.slippageBps ?? config.quote.defaultSlippageBps,
+    userPubkey: req.userPubkey,
+  });
+}
+
+async function finalizeTx(
+  pump: PumpContext,
+  config: AppConfig,
+  user: PublicKey,
+  tx: Transaction,
+  framePubkey: string,
+  sponsor: SponsorPlan
+): Promise<BuildTxResponse> {
+  const { blockhash, lastValidBlockHeight } =
+    await pump.connection.getLatestBlockhash("confirmed");
+  tx.recentBlockhash = blockhash;
+
+  const feePayer = sponsor.active ? sponsor.pubkey : user;
+  tx.feePayer = feePayer;
+
+  let partiallySignedBy: string[] | undefined;
+  if (sponsor.active) {
+    if (!config.sponsor.keypairPath) {
+      throw new Error("sponsor.keypairPath required when sponsor is active");
+    }
+    tx.partialSign(loadKeypairFromFile(config.sponsor.keypairPath));
+    partiallySignedBy = [sponsor.pubkey.toBase58()];
+  }
+
+  return {
+    transaction: tx
+      .serialize({ requireAllSignatures: false, verifySignatures: false })
+      .toString("base64"),
+    recentBlockhash: blockhash,
+    frameUsed: framePubkey,
+    lastValidBlockHeight,
+    feePayer: feePayer.toBase58(),
+    signers: [user.toBase58()],
+    partiallySignedBy,
+  };
+}
+
+function buyAtaSpecs(
+  accounts: Awaited<ReturnType<typeof loadTokenBuildAccounts>>
+): AtaSpec[] {
+  const specs: AtaSpec[] = [
+    { mint: accounts.mint, tokenProgram: accounts.baseTokenProgram },
+  ];
+  if (isNativeQuoteMint(accounts.quoteMint)) {
+    specs.push({ mint: NATIVE_MINT, tokenProgram: accounts.quoteTokenProgram });
+  } else {
+    specs.push({
+      mint: accounts.quoteMint,
+      tokenProgram: accounts.quoteTokenProgram,
+    });
+  }
+  return specs;
+}
+
+async function buildSwapTransaction(
+  pump: PumpContext,
+  config: AppConfig,
+  req: BuildTradeParams,
+  quote: QuoteResponse,
+  sponsor: SponsorPlan
+): Promise<BuildTxResponse> {
+  if (!req.mintB) throw new Error("mintB required for swap mode");
+
+  const resolved = await resolveTokens(pump, req.mintA, req.mintB);
+  if (!resolved.swapEligible) {
+    throw new Error(resolved.swapIneligibleReason ?? "swap not eligible");
+  }
+
+  const user = new PublicKey(req.userPubkey);
+  const slippageBps = req.slippageBps ?? config.quote.defaultSlippageBps;
+  const [accountsA, accountsB] = await Promise.all([
+    loadTokenBuildAccounts(pump, config, req.mintA),
+    loadTokenBuildAccounts(pump, config, req.mintB),
+  ]);
+
+  const quoteDeltaEst =
+    BigInt(quote.serviceFeeRaw) + BigInt(quote.netQuoteRaw);
+  const sellMinQuote = sellMinQuoteForSwap(quoteDeltaEst, slippageBps);
+
+  const { scratch, framePubkey } = scratchForBuild(
+    config.ifx.publicFrames,
+    config.ifx.programId
+  );
+  const tx = new Transaction();
+  tx.add(...priorityIxs(config, req.priorityTier));
+  tx.add(scratch.ixReset());
+
+  const swapIxs: TransactionInstruction[] = [];
+  await appendSwapInstructions(swapIxs, {
+    scratch,
+    user,
+    accountsA,
+    accountsB,
+    quoteLabel: quote.serviceFeeLabel,
+    baseAmountIn: BigInt(quote.inputRaw),
+    sellMinQuoteOut: sellMinQuote,
+    hop2MinBaseOut: BigInt(quote.minOutputRaw),
+    feeRecipient: new PublicKey(config.serviceFee.pubkey),
+    serviceFeeBps: config.serviceFee.bps,
+    config,
+    sponsor,
+  });
+  tx.add(...swapIxs);
+
+  return finalizeTx(pump, config, user, tx, framePubkey, sponsor);
+}
+
+async function buildSingleHopTransaction(
+  pump: PumpContext,
+  config: AppConfig,
+  req: BuildTradeParams,
+  quote: QuoteResponse,
+  sponsor: SponsorPlan
+): Promise<BuildTxResponse> {
+  const user = new PublicKey(req.userPubkey);
+  const accounts = await loadTokenBuildAccounts(pump, config, req.mintA);
+  const feeRecipient = new PublicKey(config.serviceFee.pubkey);
+  const feeRaw = BigInt(quote.serviceFeeRaw);
+  const { scratch, framePubkey } = scratchForBuild(
+    config.ifx.publicFrames,
+    config.ifx.programId
+  );
+
+  const tx = new Transaction();
+  tx.add(...priorityIxs(config, req.priorityTier));
+  tx.add(scratch.ixReset());
+
+  const baseAta = userBaseAta(
+    accounts.mint,
+    user,
+    accounts.baseTokenProgram
+  );
+  const quoteAtaPk = userQuoteAta(
+    user,
+    accounts.quoteMint,
+    accounts.quoteTokenProgram
+  );
+
+  const side = req.side ?? "buy";
+
+  if (side === "buy") {
+    const ataSpecs = buyAtaSpecs(accounts);
+    const ifxIxs: TransactionInstruction[] = [];
+    if (sponsor.active) {
+      appendSponsorAtaBootstrap(scratch, ifxIxs, sponsor.pubkey, user, ataSpecs);
+    } else {
+      for (const spec of ataSpecs) {
+        ifxIxs.push(
+          idempotentAtaCreate(user, user, spec.mint, spec.tokenProgram)
+        );
+      }
+    }
+    tx.add(...ifxIxs);
+
+    if (quote.serviceFeeLabel === "SOL" && feeRaw > 0n) {
+      tx.add(
+        serviceFeeTransferIx({
+          quoteLabel: "SOL",
+          feeRaw,
+          user,
+          userQuoteAta: quoteAtaPk,
+          recipient: feeRecipient,
+          quoteMint: accounts.quoteMint,
+          quoteTokenProgram: accounts.quoteTokenProgram,
+        })
+      );
+      tx.add(...wrapSolIxs(user, quoteAtaPk, BigInt(quote.netQuoteRaw)));
+    } else if (feeRaw > 0n) {
+      tx.add(
+        serviceFeeTransferIx({
+          quoteLabel: "USDC",
+          feeRaw,
+          user,
+          userQuoteAta: quoteAtaPk,
+          recipient: feeRecipient,
+          quoteMint: accounts.quoteMint,
+          quoteTokenProgram: accounts.quoteTokenProgram,
+        })
+      );
+    }
+
+    tx.add(
+      await buyExactQuoteInV2Instruction({
+        global: accounts.global,
+        bondingCurve: accounts.bondingCurve,
+        mint: accounts.mint,
+        user,
+        baseTokenProgram: accounts.baseTokenProgram,
+        quoteMint: accounts.quoteMint,
+        quoteTokenProgram: accounts.quoteTokenProgram,
+        spendableQuoteIn: BigInt(quote.netQuoteRaw),
+        minTokensOut: BigInt(quote.minOutputRaw),
+        associatedBaseUser: baseAta,
+      })
+    );
+  } else {
+    tx.add(
+      await sellV2Instruction({
+        global: accounts.global,
+        bondingCurve: accounts.bondingCurve,
+        mint: accounts.mint,
+        user,
+        baseTokenProgram: accounts.baseTokenProgram,
+        quoteMint: accounts.quoteMint,
+        quoteTokenProgram: accounts.quoteTokenProgram,
+        baseAmountIn: BigInt(quote.inputRaw),
+        minQuoteOut: BigInt(quote.minOutputRaw),
+      })
+    );
+
+    if (feeRaw > 0n) {
+      if (quote.serviceFeeLabel === "SOL" && isNativeQuoteMint(accounts.quoteMint)) {
+        tx.add(
+          serviceFeeTransferIxAfterSolSell({
+            feeRaw,
+            user,
+            userQuoteAta: quoteAtaPk,
+            userWsolAta: quoteAtaPk,
+            recipient: feeRecipient,
+            quoteMint: accounts.quoteMint,
+            quoteTokenProgram: accounts.quoteTokenProgram,
+          })
+        );
+      } else {
+        tx.add(
+          serviceFeeTransferIx({
+            quoteLabel: quote.serviceFeeLabel,
+            feeRaw,
+            user,
+            userQuoteAta: quoteAtaPk,
+            recipient: feeRecipient,
+            quoteMint: accounts.quoteMint,
+            quoteTokenProgram: accounts.quoteTokenProgram,
+          })
+        );
+      }
+    }
+
+    const ifxIxs: TransactionInstruction[] = [];
+    appendConditionalCloseAta(
+      scratch,
+      ifxIxs,
+      baseAta,
+      user,
+      user,
+      accounts.baseTokenProgram
+    );
+    if (sponsor.active && quote.serviceFeeLabel === "SOL") {
+      appendSponsorRepay(scratch, ifxIxs, user, sponsor.pubkey, config);
+    }
+    tx.add(...ifxIxs);
+  }
+
+  return finalizeTx(pump, config, user, tx, framePubkey, sponsor);
+}
+
+export async function buildTradeTransaction(
+  pump: PumpContext,
+  config: AppConfig,
+  req: BuildTradeParams
+): Promise<BuildTxResponse> {
+  const quote = await resolveQuoteForBuild(pump, config, req);
+
+  const user = new PublicKey(req.userPubkey);
+  const ataCount =
+    req.mode === "swap" || req.side === "buy" || req.side === undefined ? 2 : 0;
+  const sponsor = await resolveSponsorPlan(
+    pump.connection,
+    config,
+    quote.serviceFeeLabel,
+    user,
+    ataCount
+  );
+
+  if (req.mode === "swap") {
+    return buildSwapTransaction(pump, config, req, quote, sponsor);
+  }
+  return buildSingleHopTransaction(pump, config, req, quote, sponsor);
+}

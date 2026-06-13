@@ -23,14 +23,13 @@ See [`docs/design.md`](./docs/design.md) §2.3 for instruction mapping.
 
 Pump.fun **V2**: **`buy_exact_quote_in_v2`** (buy), **`sell_v2`** (sell / swap hop1). **`buy_v2` is not used** — it fixes base out (exact-output). Off-chain: [`@pump-fun/pump-sdk`](https://www.npmjs.com/package/@pump-fun/pump-sdk); on-chain: Ifx patches dynamic fields on swap hop2.
 
-## Quick start (planned)
+## Quick start
 
 ```bash
-# Config: JSON or TOML — see docs/config.md
-cp config.example.json config.local.json
-# or: cp config.example.toml config.toml
-
 npm install
+# Edit config.toml OR config.json (delete the other if both exist; toml wins)
+# Set serviceFee.pubkey (receive-only); sponsor.keypairPath if sponsor enabled
+
 npm run dev
 # Open http://127.0.0.1:8787
 ```

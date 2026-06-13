@@ -23,13 +23,13 @@
 
 买入 **`buy_exact_quote_in_v2`**，卖出/互换 hop1 **`sell_v2`**；**不用 `buy_v2`**（exact-output）。
 
-## 快速开始（规划）
+## 快速开始
 
 ```bash
-cp config.example.json config.local.json
-# 或: cp config.example.toml config.toml
-
 npm install
+# 编辑 config.toml 或 config.json（二选一；同时存在时优先 toml）
+# 填写 serviceFee.pubkey（仅收款）；启用 sponsor 时配置 keypairPath
+
 npm run dev
 # 浏览器打开 http://127.0.0.1:8787
 ```

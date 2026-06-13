@@ -1,0 +1,127 @@
+:root {
+  color-scheme: dark;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  background: #0f1115;
+  color: #e8eaed;
+}
+
+body {
+  margin: 0;
+}
+
+.wrap {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.4rem;
+}
+
+.sub {
+  margin: 0 0 1rem;
+  color: #9aa0a6;
+  font-size: 0.9rem;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem;
+  border: 1px solid #2a2f3a;
+  border-radius: 12px;
+  background: #161a22;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+input,
+select,
+button {
+  font: inherit;
+  padding: 0.45rem 0.6rem;
+  border-radius: 8px;
+  border: 1px solid #3c4454;
+  background: #0f1115;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  background: #3b82f6;
+  border-color: #3b82f6;
+  font-weight: 600;
+}
+
+button.secondary {
+  background: #1e293b;
+  border-color: #475569;
+  font-weight: 500;
+}
+
+button.secondary:hover:not(:disabled) {
+  background: #334155;
+}
+
+.wallet-bar {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.wallet-status {
+  font-size: 0.9rem;
+  flex: 1;
+  min-width: 160px;
+}
+
+.wallet-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+a {
+  color: #93c5fd;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.muted {
+  color: #9aa0a6;
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.resolve-out,
+.quote-out {
+  min-height: 3rem;
+  padding: 0.5rem;
+  border-radius: 8px;
+  background: #0f1115;
+  border: 1px dashed #2a2f3a;
+}
+
+.hidden {
+  display: none;
+}
+
+.error {
+  color: #f87171;
+}
+
+.ok {
+  color: #86efac;
+}
