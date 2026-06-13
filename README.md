@@ -27,7 +27,8 @@ Pump.fun **V2**: **`buy_exact_quote_in_v2`** (buy), **`sell_v2`** (sell / swap h
 
 ```bash
 npm install
-# Edit config.toml OR config.json (delete the other if both exist; toml wins)
+cp config.example.toml config.toml
+# or: cp config.example.json config.json (use one format only; toml wins if both exist)
 # Set serviceFee.pubkey (receive-only); sponsor.keypairPath if sponsor enabled
 
 npm run dev

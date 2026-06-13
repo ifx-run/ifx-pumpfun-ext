@@ -1,38 +1,33 @@
 import type { Connection } from "@solana/web3.js";
 import { PublicKey } from "@solana/web3.js";
 
-import type { AppConfig } from "../config/types.js";
-import type { QuoteLabel, TradeMode, TradeSide } from "../types/api.js";
+import type { AppConfig, PriorityTier } from "../config/types.js";
+import type { QuoteLabel } from "../types/api.js";
+import type { AtaSpec } from "./ata-specs.js";
+import {
+  computeTxFeeLamports,
+  sponsorTxSignatureCount,
+} from "./fees.js";
+import { sumMissingAtaRent } from "./rent.js";
 
 export type SponsorPlan = {
   active: boolean;
   pubkey: PublicKey;
-  /** Repay amount (with buffer) for sell/swap SOL paths. */
+  /** Missing ATA rent + tx fee (before repay buffer). */
+  settleLamports: bigint;
+  /** On-chain patched repay = settle × (100 + buffer) / 100. */
   repayLamports: bigint;
-  /** Estimated sponsor advance when active (rent + tx fee). */
-  estimatedAdvanceLamports: bigint;
+  txFeeLamports: bigint;
+  missingAtaRentLamports: bigint;
 };
-
-export function computeRepayLamports(config: AppConfig): bigint {
-  const base = BigInt(
-    config.sponsor.estimatedAtaRentLamports + config.sponsor.estimatedTxFeeLamports
-  );
-  return (base * BigInt(100 + config.sponsor.repayBufferPercent)) / 100n;
-}
-
-export function estimateAdvanceLamports(
-  config: AppConfig,
-  ataCount: number
-): bigint {
-  return BigInt(
-    config.sponsor.estimatedAtaRentLamports * ataCount +
-      config.sponsor.estimatedTxFeeLamports
-  );
-}
 
 const INACTIVE_PUBKEY = new PublicKey(
   "11111111111111111111111111111111"
 );
+
+export function applyRepayBuffer(settle: bigint, bufferPercent: number): bigint {
+  return (settle * BigInt(100 + bufferPercent)) / 100n;
+}
 
 export function inactiveSponsorPlan(config: AppConfig): SponsorPlan {
   const pubkey = config.sponsor.pubkey
@@ -41,66 +36,100 @@ export function inactiveSponsorPlan(config: AppConfig): SponsorPlan {
   return {
     active: false,
     pubkey,
-    repayLamports: computeRepayLamports(config),
-    estimatedAdvanceLamports: 0n,
+    settleLamports: 0n,
+    repayLamports: 0n,
+    txFeeLamports: 0n,
+    missingAtaRentLamports: 0n,
   };
 }
 
-/** SOL quote + enabled + user below min balance → sponsor co-signs and advances rent/fees. */
+/** SOL quote + enabled → sponsor co-signs; settle derived from rent RPC + priority fee math. */
 export async function resolveSponsorPlan(
   connection: Connection,
   config: AppConfig,
-  quoteLabel: QuoteLabel,
-  user: PublicKey,
-  ataCountForAdvance: number
+  opts: {
+    quoteLabel: QuoteLabel;
+    priorityTier: PriorityTier;
+    user: PublicKey;
+    bootstrapSpecs: AtaSpec[];
+  }
 ): Promise<SponsorPlan> {
   const base = inactiveSponsorPlan(config);
-  if (!config.sponsor.enabled || quoteLabel !== "SOL") {
+  if (!config.sponsor.enabled || opts.quoteLabel !== "SOL") {
     return base;
   }
   if (!config.sponsor.pubkey || !config.sponsor.keypairPath) {
     return base;
   }
 
-  const bal = await connection.getBalance(user);
-  if (bal >= config.sponsor.minUserSolLamports) {
-    return base;
-  }
+  const missingAtaRentLamports = await sumMissingAtaRent(
+    connection,
+    opts.user,
+    opts.bootstrapSpecs
+  );
+  const txFeeLamports = computeTxFeeLamports(
+    config,
+    opts.priorityTier,
+    sponsorTxSignatureCount()
+  );
+  const settleLamports = missingAtaRentLamports + txFeeLamports;
+  const repayLamports = applyRepayBuffer(
+    settleLamports,
+    config.sponsor.repayBufferPercent
+  );
 
   return {
     active: true,
     pubkey: new PublicKey(config.sponsor.pubkey),
-    repayLamports: computeRepayLamports(config),
-    estimatedAdvanceLamports: estimateAdvanceLamports(config, ataCountForAdvance),
+    settleLamports,
+    repayLamports,
+    txFeeLamports,
+    missingAtaRentLamports,
   };
 }
 
-/** Quote-time hint without full sponsor plan resolution. */
-export function sponsorQuoteHint(
+export async function sponsorQuoteHint(
+  connection: Connection,
   config: AppConfig,
-  quoteLabel: QuoteLabel,
-  opts?: {
-    mode: TradeMode;
-    side: TradeSide;
-    userLamports?: bigint;
+  opts: {
+    quoteLabel: QuoteLabel;
+    priorityTier: PriorityTier;
+    user?: PublicKey;
+    bootstrapSpecs: AtaSpec[];
   }
-): { required: boolean; estimatedLamports: string } | undefined {
-  if (!config.sponsor.enabled || quoteLabel !== "SOL") return undefined;
+): Promise<{ required: boolean; estimatedLamports: string } | undefined> {
+  if (!config.sponsor.enabled || opts.quoteLabel !== "SOL") return undefined;
 
-  const mode = opts?.mode ?? "trade";
-  const side = opts?.side ?? "buy";
-  const estimated =
-    mode === "swap" || side === "buy"
-      ? estimateAdvanceLamports(config, 2)
-      : computeRepayLamports(config);
-
-  let required = true;
-  if (opts?.userLamports !== undefined) {
-    required = opts.userLamports < BigInt(config.sponsor.minUserSolLamports);
-  }
+  const user = opts.user ?? PublicKey.unique();
+  const missingAtaRentLamports = await sumMissingAtaRent(
+    connection,
+    user,
+    opts.bootstrapSpecs
+  );
+  const txFeeLamports = computeTxFeeLamports(
+    config,
+    opts.priorityTier,
+    sponsorTxSignatureCount()
+  );
+  const settle = missingAtaRentLamports + txFeeLamports;
+  const estimated = applyRepayBuffer(settle, config.sponsor.repayBufferPercent);
 
   return {
-    required,
+    required: true,
     estimatedLamports: estimated.toString(),
   };
+}
+
+/** Sell/swap: min quote proceeds must cover sponsor repay (from trade output, not wallet balance). */
+export function assertSponsorRepayCoverage(
+  minQuoteProceeds: bigint,
+  serviceFeeRaw: bigint,
+  repayLamports: bigint
+): void {
+  const available = minQuoteProceeds - serviceFeeRaw;
+  if (available < repayLamports) {
+    throw new Error(
+      `quote output insufficient for sponsor repay (need ${repayLamports} lamports after fee, min available ${available})`
+    );
+  }
 }

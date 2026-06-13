@@ -27,7 +27,8 @@
 
 ```bash
 npm install
-# 编辑 config.toml 或 config.json（二选一；同时存在时优先 toml）
+cp config.example.toml config.toml
+# 或: cp config.example.json config.json（二选一；同时存在时优先 toml）
 # 填写 serviceFee.pubkey（仅收款）；启用 sponsor 时配置 keypairPath
 
 npm run dev

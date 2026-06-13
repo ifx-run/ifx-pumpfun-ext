@@ -15,6 +15,7 @@ import { quoteTrade } from "./pump/quote.js";
 const resolveBody = z.object({
   mintA: z.string().min(32),
   mintB: z.string().min(32).optional(),
+  userPubkey: z.string().optional(),
 });
 
 const quoteBody = z.object({
@@ -79,7 +80,13 @@ export async function buildApp() {
       return reply.code(400).send({ error: parsed.error.flatten() });
     }
     try {
-      return await resolveTokens(pump, parsed.data.mintA, parsed.data.mintB);
+      return await resolveTokens(
+        pump,
+        config,
+        parsed.data.mintA,
+        parsed.data.mintB,
+        parsed.data.userPubkey
+      );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       return reply.code(400).send({ error: msg });

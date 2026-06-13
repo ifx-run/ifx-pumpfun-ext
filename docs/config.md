@@ -2,7 +2,12 @@
 
 # Configuration
 
-Edit **`config.toml`** or **`config.json`** at the repo root (both are tracked in git). **Use one format only** — if both files exist, **`config.toml` wins**.
+Copy an example and edit locally (both gitignored):
+
+- TOML: `cp config.example.toml config.toml`
+- JSON: `cp config.example.json config.json`
+
+**Use one format only** — if both files exist, **`config.toml` wins**.
 
 Override path: `IFX_PUMPFUN_CONFIG=/path/to/config.toml`.
 

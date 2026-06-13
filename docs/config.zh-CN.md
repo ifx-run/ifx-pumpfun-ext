@@ -2,7 +2,12 @@
 
 # 配置说明
 
-编辑仓库根目录 **`config.toml`** 或 **`config.json`**（均纳入 git）。**只保留一种格式** — 若两个文件同时存在，**优先读 `config.toml`**。
+从 example 复制并本地编辑（均已 gitignore）：
+
+- TOML：`cp config.example.toml config.toml`
+- JSON：`cp config.example.json config.json`
+
+**只保留一种格式** — 若两个文件同时存在，**优先读 `config.toml`**。
 
 自定义路径：`IFX_PUMPFUN_CONFIG=/path/to/config.toml`。
 

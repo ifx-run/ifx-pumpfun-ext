@@ -112,15 +112,9 @@ function readTomlConfig(path: string): Partial<AppConfig> {
       enabled: sponsor.enabled === true,
       pubkey: str(sponsor.pubkey) ?? "",
       keypairPath: str(sponsor.keypairPath ?? sponsor.keypair_path),
-      minUserSolLamports:
-        num(sponsor.minUserSolLamports ?? sponsor.min_user_sol_lamports) ?? 0,
       repayBufferPercent:
         num(sponsor.repayBufferPercent ?? sponsor.repay_margin_bps ?? sponsor.repay_buffer_percent) ??
         0,
-      estimatedAtaRentLamports:
-        num(sponsor.estimatedAtaRentLamports ?? sponsor.estimated_ata_rent_lamports) ?? 0,
-      estimatedTxFeeLamports:
-        num(sponsor.estimatedTxFeeLamports ?? sponsor.estimated_tx_fee_lamports) ?? 0,
     };
   }
 
@@ -206,10 +200,7 @@ export function defaultConfig(): AppConfig {
     sponsor: {
       enabled: false,
       pubkey: "",
-      minUserSolLamports: 5_000_000,
       repayBufferPercent: 10,
-      estimatedAtaRentLamports: 2_039_280,
-      estimatedTxFeeLamports: 15_000,
     },
     serviceFee: {
       bps: 5,
@@ -274,16 +265,19 @@ function validateConfig(cfg: AppConfig): void {
     );
   }
 
-  if (cfg.sponsor.enabled && !isValidPubkey(cfg.sponsor.pubkey)) {
-    throw new Error("sponsor.pubkey must be a valid base58 pubkey when sponsor.enabled is true");
+  if (cfg.sponsor.enabled) {
+    if (!isValidPubkey(cfg.sponsor.pubkey)) {
+      throw new Error(
+        "sponsor.pubkey must be a valid base58 pubkey when sponsor.enabled is true"
+      );
+    }
+    assertKeypairSection(
+      "sponsor",
+      cfg.sponsor.pubkey,
+      cfg.sponsor.keypairPath,
+      true
+    );
   }
-
-  assertKeypairSection(
-    "sponsor",
-    cfg.sponsor.pubkey,
-    cfg.sponsor.keypairPath,
-    cfg.sponsor.enabled
-  );
 }
 
 export function loadConfig(): AppConfig {

@@ -10,6 +10,7 @@ let publicConfig = {
 let resolveState = null;
 let quoteAbort = null;
 let lastQuoteSnapshot = null;
+let lastQuoteExceedsBalance = false;
 let walletProvider = null;
 let walletPubkey = null;
 
@@ -46,7 +47,7 @@ function updateWalletUi() {
 
 function updateBuildBtn() {
   const btn = $("buildSignBtn");
-  btn.disabled = !(walletPubkey && lastQuoteSnapshot);
+  btn.disabled = !(walletPubkey && lastQuoteSnapshot && !lastQuoteExceedsBalance);
 }
 
 function snapshotFromQuote(q) {
@@ -308,9 +309,16 @@ async function doResolve() {
     resolveState = await api("/api/token/resolve", {
       mintA,
       mintB: mintB || undefined,
+      userPubkey: walletPubkey || undefined,
     });
     const a = resolveState.tokenA;
     let html = `<div class="ok">A: quote ${a.quoteLabel} · ${a.decimals} decimals</div>`;
+    if (resolveState.wallet) {
+      const w = resolveState.wallet;
+      html += `<div class="muted">Wallet: ${w.solUi} SOL · ${w.usdcUi} USDC`;
+      if (w.baseA) html += ` · ${w.baseA.ui} base A`;
+      html += "</div>";
+    }
     if (resolveState.tokenB) {
       const b = resolveState.tokenB;
       html += `<div>${resolveState.swapEligible ? "✓" : "✗"} B: quote ${b.quoteLabel}`;
@@ -334,14 +342,30 @@ function renderQuote(q) {
   el.className = "quote-out";
   let sponsorLine = "";
   if (q.sponsor) {
-    const tag = q.sponsor.required ? "required" : "optional";
-    sponsorLine = `<div>Sponsor (${tag}): ~${q.sponsor.estimatedLamports} lamports</div>`;
+    sponsorLine = `<div>Sponsor repay (est.): ~${q.sponsor.estimatedLamports} lamports</div>`;
   }
+  let walletLine = "";
+  if (q.wallet) {
+    walletLine = `<div class="muted">Balance: ${q.wallet.solUi} SOL · ${q.wallet.usdcUi} USDC`;
+    if (q.wallet.baseA) walletLine += ` · ${q.wallet.baseA.ui} base A`;
+    walletLine += "</div>";
+  }
+  let limitLine = "";
+  if (q.inputLimit) {
+    const cls = q.inputLimit.exceedsBalance ? "error" : "muted";
+    limitLine = `<div class="${cls}">Max input (${q.inputLimit.asset}): ${q.inputLimit.maxInputUi}`;
+    if (q.inputLimit.hint) limitLine += ` — ${q.inputLimit.hint}`;
+    limitLine += "</div>";
+  }
+  lastQuoteExceedsBalance = q.inputLimit?.exceedsBalance ?? false;
+  updateBuildBtn();
   el.innerHTML = `
     <div><strong>Expected out:</strong> ${q.expectedOutputUi}</div>
     <div>Min out (raw): ${q.minOutputRaw}</div>
     <div>Service fee: ${q.serviceFeeRaw} ${q.serviceFeeLabel}</div>
     <div>Net quote → Pump: ${q.netQuoteRaw}</div>
+    ${walletLine}
+    ${limitLine}
     ${sponsorLine}
     <div class="muted">Route: ${q.route.join(" → ")}</div>
     <div class="muted">inputRaw: ${q.inputRaw} (frozen for build)</div>
@@ -363,6 +387,7 @@ async function doQuote() {
   out.textContent = "Quoting…";
   out.className = "quote-out muted";
   lastQuoteSnapshot = null;
+  lastQuoteExceedsBalance = false;
   updateBuildBtn();
 
   try {

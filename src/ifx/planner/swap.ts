@@ -9,7 +9,6 @@ import {
 import {
   createSyncNativeInstruction,
   createTransferInstruction,
-  NATIVE_MINT,
 } from "@solana/spl-token";
 import {
   PublicKey,
@@ -30,13 +29,14 @@ import {
 import { quoteAta } from "../../pump/sdk.js";
 import { BUY_EXACT_QUOTE_IN_V2_SPENDABLE_QUOTE_IN_OFFSET } from "../../pump/patch-offsets.js";
 import { minOutRaw } from "../../util/amount.js";
-import type { AppConfig } from "../../config/types.js";
 import type { SponsorPlan } from "../../sponsor/plan.js";
+import { swapHop2AtaSpecs } from "../../sponsor/ata-specs.js";
 import { appendConditionalCloseAta } from "./close-ata.js";
 import {
   appendSponsorAtaBootstrap,
-  appendSponsorRepay,
-  type AtaSpec,
+  appendSponsorRepayTransfer,
+  appendSponsorSettleAssert,
+  type U64Binding,
 } from "./sponsor.js";
 
 export type SwapBuildParams = {
@@ -50,7 +50,7 @@ export type SwapBuildParams = {
   hop2MinBaseOut: bigint;
   feeRecipient: PublicKey;
   serviceFeeBps: number;
-  config: AppConfig;
+  repayBufferPercent: number;
   sponsor?: SponsorPlan;
 };
 
@@ -94,7 +94,7 @@ export async function appendSwapInstructions(
     hop2MinBaseOut,
     feeRecipient,
     serviceFeeBps,
-    config,
+    repayBufferPercent,
     sponsor,
   } = params;
 
@@ -116,17 +116,17 @@ export async function appendSwapInstructions(
     accountsB.baseTokenProgram
   );
 
-  const hop2AtaSpecs: AtaSpec[] = [
-    { mint: accountsB.mint, tokenProgram: accountsB.baseTokenProgram },
-  ];
-  if (!isNativeQuoteMint(quoteMint)) {
-    hop2AtaSpecs.push({ mint: quoteMint, tokenProgram: quoteTokenProgram });
-  } else {
-    hop2AtaSpecs.push({ mint: NATIVE_MINT, tokenProgram: quoteTokenProgram });
-  }
+  const hop2AtaSpecs = swapHop2AtaSpecs(accountsB);
 
+  let ataBootstrap: ReturnType<typeof appendSponsorAtaBootstrap> = null;
   if (sponsor?.active) {
-    appendSponsorAtaBootstrap(scratch, out, sponsor.pubkey, user, hop2AtaSpecs);
+    ataBootstrap = appendSponsorAtaBootstrap(
+      scratch,
+      out,
+      sponsor.pubkey,
+      user,
+      hop2AtaSpecs
+    );
   } else {
     for (const spec of hop2AtaSpecs) {
       out.push(
@@ -165,11 +165,44 @@ export async function appendSwapInstructions(
   const fee = afterSell.letEval(
     expr.bpsMulFloor(quoteDelta, expr.u64(serviceFeeBps))
   );
-  const netQuote = afterSell.letEval(expr.sub(quoteDelta, fee));
+
+  let netQuote = afterSell.letEval(expr.sub(quoteDelta, fee));
+  let sponsorRepay: U64Binding | undefined;
+
+  if (sponsor?.active && quoteLabel === "SOL") {
+    const settle = ataBootstrap
+      ? afterSell.letEval(
+          expr.add(ataBootstrap.ataCost, expr.u64(sponsor.txFeeLamports))
+        )
+      : afterSell.letEval(expr.u64(sponsor.txFeeLamports));
+    sponsorRepay = afterSell.letEval(
+      expr.div(
+        expr.mul(settle, expr.u64(100 + repayBufferPercent)),
+        expr.u64(100)
+      )
+    );
+    netQuote = afterSell.letEval(
+      expr.sub(expr.sub(quoteDelta, fee), sponsorRepay)
+    );
+  }
+
   out.push(afterSell.buildIx());
+
+  if (sponsorRepay) {
+    appendSponsorSettleAssert(scratch, out, quoteDelta, sponsorRepay);
+  }
 
   if (quoteLabel === "SOL") {
     out.push(patchedSolTransfer(scratch, user, feeRecipient, fee));
+    if (sponsorRepay && sponsor) {
+      appendSponsorRepayTransfer(
+        scratch,
+        out,
+        user,
+        sponsor.pubkey,
+        sponsorRepay
+      );
+    }
     out.push(patchedSolTransfer(scratch, user, quoteAtaPk, netQuote));
     out.push(createSyncNativeInstruction(quoteAtaPk));
   } else {
@@ -228,10 +261,6 @@ export async function appendSwapInstructions(
     user,
     accountsA.baseTokenProgram
   );
-
-  if (sponsor?.active && quoteLabel === "SOL") {
-    appendSponsorRepay(scratch, out, user, sponsor.pubkey, config);
-  }
 }
 
 export function sellMinQuoteForSwap(

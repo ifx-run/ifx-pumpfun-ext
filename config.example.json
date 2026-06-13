@@ -31,10 +31,7 @@
     "enabled": false,
     "pubkey": "YourSponsorPubkey...",
     "keypairPath": "./keys/sponsor.json",
-    "minUserSolLamports": 5000000,
-    "repayBufferPercent": 10,
-    "estimatedAtaRentLamports": 2039280,
-    "estimatedTxFeeLamports": 15000
+    "repayBufferPercent": 10
   },
   "quote": {
     "debounceMs": 300,

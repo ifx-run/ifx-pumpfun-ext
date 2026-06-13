@@ -10,7 +10,16 @@ import type {
 import { applyBps, formatRawToUi, minOutRaw, parseAmountToRaw } from "../util/amount.js";
 import type { PumpContext } from "./context.js";
 import { resolveTokens } from "./resolve.js";
-import { sponsorQuoteHint } from "../sponsor/plan.js";
+import { resolveBootstrapAtaSpecs } from "../sponsor/bootstrap-specs.js";
+import {
+  assertSponsorRepayCoverage,
+  sponsorQuoteHint,
+} from "../sponsor/plan.js";
+import { sellMinQuoteForSwap } from "../ifx/planner/swap.js";
+import {
+  computeInputLimit,
+  fetchWalletBalances,
+} from "../wallet/balances.js";
 
 function serviceFeeRaw(basis: bigint, bps: number): bigint {
   return applyBps(basis, bps);
@@ -133,7 +142,13 @@ export async function quoteTrade(
   config: AppConfig,
   req: QuoteRequest
 ): Promise<QuoteResponse> {
-  const resolved = await resolveTokens(pump, req.mintA, req.mintB);
+  const resolved = await resolveTokens(
+    pump,
+    config,
+    req.mintA,
+    req.mintB,
+    req.userPubkey
+  );
   const slippageBps = req.slippageBps;
   const serviceFeeBps = config.serviceFee.bps;
 
@@ -175,30 +190,77 @@ export async function quoteTrade(
   }
 
   const quoteLabel = response.serviceFeeLabel;
-  let userLamports: bigint | undefined;
-  if (req.userPubkey) {
-    userLamports = BigInt(
-      await pump.connection.getBalance(new PublicKey(req.userPubkey))
-    );
-  }
-
   const side = req.side ?? "buy";
-  const sponsor = sponsorQuoteHint(config, quoteLabel, {
-    mode: req.mode,
-    side,
-    userLamports,
-  });
-  if (!sponsor) return response;
+  const priorityTier = config.priorityFee.defaultTier;
 
-  const enriched: QuoteResponse = { ...response, sponsor };
-  if (!sponsor.required) return enriched;
+  let result: QuoteResponse = response;
 
-  const route = [...enriched.route];
-  if (req.mode === "swap" || side === "buy") {
-    route.unshift("sponsor.bootstrap");
+  if (req.userPubkey) {
+    const needsBase =
+      req.mode === "swap" || (req.side ?? "buy") === "sell";
+    const wallet =
+      resolved.wallet ??
+      (await fetchWalletBalances(
+        pump.connection,
+        config,
+        new PublicKey(req.userPubkey),
+        needsBase ? resolved.tokenA : undefined
+      ));
+    const inputLimit = computeInputLimit({
+      mode: req.mode,
+      side,
+      tokenA: resolved.tokenA,
+      inputRaw: BigInt(response.inputRaw),
+      wallet,
+      sponsorEnabled: config.sponsor.enabled,
+    });
+    result = { ...result, wallet, inputLimit };
   }
-  if (req.mode === "swap" || side === "sell") {
-    route.push("sponsor.repay");
+
+  if (config.sponsor.enabled && quoteLabel === "SOL") {
+    const bootstrapSpecs = await resolveBootstrapAtaSpecs(pump, config, {
+      mode: req.mode,
+      side,
+      mintA: req.mintA,
+      mintB: req.mintB,
+    });
+    const user = req.userPubkey
+      ? new PublicKey(req.userPubkey)
+      : undefined;
+    const sponsor = await sponsorQuoteHint(pump.connection, config, {
+      quoteLabel,
+      priorityTier,
+      user,
+      bootstrapSpecs,
+    });
+    if (sponsor) {
+      const repayLamports = BigInt(sponsor.estimatedLamports);
+      if (req.mode === "swap") {
+        const quoteDeltaEst =
+          BigInt(response.serviceFeeRaw) + BigInt(response.netQuoteRaw);
+        assertSponsorRepayCoverage(
+          sellMinQuoteForSwap(quoteDeltaEst, slippageBps),
+          BigInt(response.serviceFeeRaw),
+          repayLamports
+        );
+      } else if (side === "sell") {
+        assertSponsorRepayCoverage(
+          BigInt(response.minOutputRaw),
+          BigInt(response.serviceFeeRaw),
+          repayLamports
+        );
+      }
+
+      const route = [...result.route];
+      if (req.mode === "swap" || side === "buy") {
+        route.unshift("sponsor.bootstrap");
+      }
+      if (req.mode === "swap" || side === "sell") {
+        route.push("sponsor.repay");
+      }
+      return { ...result, sponsor, route };
+    }
   }
-  return { ...enriched, route };
+
+  return result;
 }

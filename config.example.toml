@@ -41,10 +41,7 @@ pubkey = "YourFeeRecipientPubkey..."
 enabled = false
 pubkey = "YourSponsorPubkey..."
 keypair_path = "./keys/sponsor.json"
-min_user_sol_lamports = 5_000_000
 repay_buffer_percent = 10
-estimated_ata_rent_lamports = 2_039_280
-estimated_tx_fee_lamports = 15_000
 
 [quote]
 debounce_ms = 300

@@ -18,10 +18,8 @@ export type SponsorConfig = {
   pubkey: string;
   /** Path to solana-keygen JSON keypair; required when enabled for co-signing. */
   keypairPath?: string;
-  minUserSolLamports: number;
+  /** Repay margin: patched repay = (on-chain ataCost + tx fee) × (100 + bps) / 100. */
   repayBufferPercent: number;
-  estimatedAtaRentLamports: number;
-  estimatedTxFeeLamports: number;
 };
 
 export type AppConfig = {

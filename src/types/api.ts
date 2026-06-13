@@ -19,6 +19,17 @@ export type ResolveResponse = {
   tokenB?: TokenMeta;
   swapEligible: boolean;
   swapIneligibleReason: string | null;
+  wallet?: {
+    solRaw: string;
+    solUi: string;
+    usdcRaw: string;
+    usdcUi: string;
+    baseA?: {
+      raw: string;
+      ui: string;
+      decimals: number;
+    };
+  };
 };
 
 export type QuoteRequest = {
@@ -45,6 +56,24 @@ export type QuoteResponse = {
   sponsor?: {
     required: boolean;
     estimatedLamports: string;
+  };
+  wallet?: {
+    solRaw: string;
+    solUi: string;
+    usdcRaw: string;
+    usdcUi: string;
+    baseA?: {
+      raw: string;
+      ui: string;
+      decimals: number;
+    };
+  };
+  inputLimit?: {
+    asset: "SOL" | "USDC" | "base";
+    maxInputRaw: string;
+    maxInputUi: string;
+    exceedsBalance: boolean;
+    hint: string | null;
   };
 };
 

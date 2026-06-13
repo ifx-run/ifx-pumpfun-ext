@@ -4,7 +4,6 @@ import {
   Transaction,
   TransactionInstruction,
 } from "@solana/web3.js";
-import { NATIVE_MINT } from "@solana/spl-token";
 
 import type { AppConfig, PriorityTier } from "../config/types.js";
 import { loadKeypairFromFile } from "../config/keypair.js";
@@ -20,7 +19,6 @@ import {
 import {
   appendSponsorAtaBootstrap,
   appendSponsorRepay,
-  type AtaSpec,
 } from "../ifx/planner/sponsor.js";
 import { scratchForBuild } from "../ifx/frames.js";
 import { loadTokenBuildAccounts } from "../pump/accounts.js";
@@ -36,7 +34,17 @@ import {
   userQuoteAta,
   wrapSolIxs,
 } from "../pump/instructions.js";
-import { resolveSponsorPlan, type SponsorPlan } from "../sponsor/plan.js";
+import { resolveBootstrapAtaSpecs } from "../sponsor/bootstrap-specs.js";
+import { buyAtaSpecs } from "../sponsor/ata-specs.js";
+import {
+  assertSponsorRepayCoverage,
+  resolveSponsorPlan,
+  type SponsorPlan,
+} from "../sponsor/plan.js";
+import {
+  computeInputLimit,
+  fetchWalletBalances,
+} from "../wallet/balances.js";
 import type { BuildTxRequest, BuildTxResponse, QuoteResponse, QuoteSnapshot } from "../types/api.js";
 
 function priorityIxs(config: AppConfig, tier: PriorityTier): TransactionInstruction[] {
@@ -122,23 +130,6 @@ async function finalizeTx(
   };
 }
 
-function buyAtaSpecs(
-  accounts: Awaited<ReturnType<typeof loadTokenBuildAccounts>>
-): AtaSpec[] {
-  const specs: AtaSpec[] = [
-    { mint: accounts.mint, tokenProgram: accounts.baseTokenProgram },
-  ];
-  if (isNativeQuoteMint(accounts.quoteMint)) {
-    specs.push({ mint: NATIVE_MINT, tokenProgram: accounts.quoteTokenProgram });
-  } else {
-    specs.push({
-      mint: accounts.quoteMint,
-      tokenProgram: accounts.quoteTokenProgram,
-    });
-  }
-  return specs;
-}
-
 async function buildSwapTransaction(
   pump: PumpContext,
   config: AppConfig,
@@ -148,7 +139,7 @@ async function buildSwapTransaction(
 ): Promise<BuildTxResponse> {
   if (!req.mintB) throw new Error("mintB required for swap mode");
 
-  const resolved = await resolveTokens(pump, req.mintA, req.mintB);
+  const resolved = await resolveTokens(pump, config, req.mintA, req.mintB);
   if (!resolved.swapEligible) {
     throw new Error(resolved.swapIneligibleReason ?? "swap not eligible");
   }
@@ -163,6 +154,14 @@ async function buildSwapTransaction(
   const quoteDeltaEst =
     BigInt(quote.serviceFeeRaw) + BigInt(quote.netQuoteRaw);
   const sellMinQuote = sellMinQuoteForSwap(quoteDeltaEst, slippageBps);
+
+  if (sponsor.active && quote.serviceFeeLabel === "SOL") {
+    assertSponsorRepayCoverage(
+      sellMinQuote,
+      BigInt(quote.serviceFeeRaw),
+      sponsor.repayLamports
+    );
+  }
 
   const { scratch, framePubkey } = scratchForBuild(
     config.ifx.publicFrames,
@@ -184,7 +183,7 @@ async function buildSwapTransaction(
     hop2MinBaseOut: BigInt(quote.minOutputRaw),
     feeRecipient: new PublicKey(config.serviceFee.pubkey),
     serviceFeeBps: config.serviceFee.bps,
-    config,
+    repayBufferPercent: config.sponsor.repayBufferPercent,
     sponsor,
   });
   tx.add(...swapIxs);
@@ -333,7 +332,15 @@ async function buildSingleHopTransaction(
       accounts.baseTokenProgram
     );
     if (sponsor.active && quote.serviceFeeLabel === "SOL") {
-      appendSponsorRepay(scratch, ifxIxs, user, sponsor.pubkey, config);
+      assertSponsorRepayCoverage(
+        BigInt(quote.minOutputRaw),
+        feeRaw,
+        sponsor.repayLamports
+      );
+      appendSponsorRepay(scratch, ifxIxs, user, sponsor.pubkey, {
+        txFeeLamports: sponsor.txFeeLamports,
+        repayBufferPercent: config.sponsor.repayBufferPercent,
+      });
     }
     tx.add(...ifxIxs);
   }
@@ -349,15 +356,40 @@ export async function buildTradeTransaction(
   const quote = await resolveQuoteForBuild(pump, config, req);
 
   const user = new PublicKey(req.userPubkey);
-  const ataCount =
-    req.mode === "swap" || req.side === "buy" || req.side === undefined ? 2 : 0;
-  const sponsor = await resolveSponsorPlan(
-    pump.connection,
-    config,
-    quote.serviceFeeLabel,
+  const side = req.side ?? "buy";
+  const needsBase = req.mode === "swap" || side === "sell";
+  const resolved = await resolveTokens(pump, config, req.mintA, req.mintB);
+  const wallet =
+    (await fetchWalletBalances(
+      pump.connection,
+      config,
+      user,
+      needsBase ? resolved.tokenA : undefined
+    ));
+  const limit = computeInputLimit({
+    mode: req.mode,
+    side,
+    tokenA: resolved.tokenA,
+    inputRaw: BigInt(quote.inputRaw),
+    wallet,
+    sponsorEnabled: config.sponsor.enabled,
+  });
+  if (limit.exceedsBalance) {
+    throw new Error(limit.hint ?? "input exceeds wallet balance");
+  }
+
+  const bootstrapSpecs = await resolveBootstrapAtaSpecs(pump, config, {
+    mode: req.mode,
+    side: req.side,
+    mintA: req.mintA,
+    mintB: req.mintB,
+  });
+  const sponsor = await resolveSponsorPlan(pump.connection, config, {
+    quoteLabel: quote.serviceFeeLabel,
+    priorityTier: req.priorityTier,
     user,
-    ataCount
-  );
+    bootstrapSpecs,
+  });
 
   if (req.mode === "swap") {
     return buildSwapTransaction(pump, config, req, quote, sponsor);
