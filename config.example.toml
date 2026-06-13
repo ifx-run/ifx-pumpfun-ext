@@ -1,0 +1,40 @@
+[server]
+host = "127.0.0.1"
+port = 8787
+
+[rpc]
+url = "https://api.mainnet-beta.solana.com"
+commitment = "confirmed"
+cache_ttl_ms = 2000
+
+[ifx]
+# program_id = "ifxmwWVVZDmXN2DUVf7wtJYCXTRY4QsL5rzmNkXzxbj"
+# Existing public Frame pubkeys (no create, no on-chain decode). Planner uses DEFAULT_TAPE_LEN.
+public_frames = [
+  "6RNv1eQ7fogEW7R1QGg6dAiddEefGfYgJVtjpvgENtdn",
+]
+
+[sponsor]
+# keypair_path = "./keys/sponsor.json"
+repay_margin_bps = 100
+min_user_sol_lamports = 5_000_000
+advance_cap_lamports = 20_000_000
+
+[service_fee]
+# 万分之五 = 5 bps = 0.05%. Quote-only (SOL / USDC); recipient = sponsor pubkey.
+# Operator must pre-create sponsor USDC ATA before USDC-quote trades.
+bps = 5
+
+[priority_fee]
+low = 1_000
+medium = 10_000
+high = 100_000
+compute_unit_limit = 400_000
+
+[quote]
+debounce_ms = 300
+default_slippage_bps = 100
+
+[pump]
+usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+native_mint = "So11111111111111111111111111111111111111112"
