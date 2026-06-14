@@ -47,16 +47,16 @@
 
 ---
 
-## 为什么 Ifx 适合 Pump.fun
+## 本 demo 用 Ifx 编排了什么
 
-| 需求 | Ifx 能力 | 参考示例 |
-|------|----------|----------|
+本仓库通过 [`@pump-fun/pump-sdk`](https://www.npmjs.com/package/@pump-fun/pump-sdk) 对接 Pump.fun bonding curve **v2** 指令，并用 [`@ifx-run/sdk`](https://www.npmjs.com/package/@ifx-run/sdk)（[源码](https://github.com/ifx-run/ifx/tree/main/sdk)）做链上编排：
+
+| 模式 | Ifx 能力 | 参考 |
+|------|----------|------|
 | 卖出后余额为 0 才关 ATA | `ifx_let` + `ifx_if_else` → CloseAccount 或 Skip | [dust-destroy-token2022](https://github.com/ifx-run/ifx/blob/main/sdk/examples/dust-destroy-token2022.ts) |
-| A→quote→B 第二跳 amount 来自第一跳 | hop1 静态 CPI → `let` 中间 quote → `rawCpiPatch` hop2 | [two-hop-token-swap](https://github.com/ifx-run/ifx/blob/main/sdk/examples/two-hop-token-swap.ts) |
-| SOL 不足时代付 rent/fee，卖出后偿还 | 基线 `let` → 幂等 ATA → patched transfer | [sponsored_buy](https://github.com/ifx-run/ifx/blob/main/tests/sponsored_buy.ts) |
-| Patch Pump `sell_v2` / `buy_exact_quote_in_v2` | `rawCpi` + `data_offset` | [raw-cpi-patches](https://github.com/ifx-run/ifx/blob/main/docs/raw-cpi-patches.zh-CN.md) |
-
-链下模板与曲线数学：[`@pump-fun/pump-sdk`](https://www.npmjs.com/package/@pump-fun/pump-sdk)。链上编排：[`@ifx-run/sdk`](https://www.npmjs.com/package/@ifx-run/sdk)（[源码](https://github.com/ifx-run/ifx/tree/main/sdk)）。
+| 第二跳金额来自第一跳（同 quote 池） | `let` → hop2 `rawCpiPatch` | [two-hop-token-swap](https://github.com/ifx-run/ifx/blob/main/sdk/examples/two-hop-token-swap.ts) |
+| 单跳卖出后 sponsor 偿还 | patched `SystemProgram.transfer` | [sponsored_buy](https://github.com/ifx-run/ifx/blob/main/tests/sponsored_buy.ts) |
+| 构建时 patch Pump 指令字段 | `rawCpi` + `data_offset` | [raw-cpi-patches](https://github.com/ifx-run/ifx/blob/main/docs/raw-cpi-patches.zh-CN.md) |
 
 ---
 
@@ -68,6 +68,31 @@
 |------|---------|
 | **两跳 swap** — 同一笔 tx 内卖 A，Ifx `let` + patched `buy_exact_quote_in_v2` 买 B | [2Q41RL3bW5BaNMW19RqGRNnoz3t4vuApVKVxPSN38rjLAG3dVaQDAtsjvLHPsLuapFjxxT2dzFovpFePHhesdegT](https://solscan.io/tx/2Q41RL3bW5BaNMW19RqGRNnoz3t4vuApVKVxPSN38rjLAG3dVaQDAtsjvLHPsLuapFjxxT2dzFovpFePHhesdegT) |
 | **Sponsored sell** — sponsor 代付 gas；卖出 proceeds 经 patched transfer 偿还 | [4VEQXHs176NLA5pbjL16hT7Ly4WWWC83P1VQGYXT416tJAS5APirSQbDaeXftSqKnotoCfkWtZBYYoYu64QgNAe9](https://solscan.io/tx/4VEQXHs176NLA5pbjL16hT7Ly4WWWC83P1VQGYXT416tJAS5APirSQbDaeXftSqKnotoCfkWtZBYYoYu64QgNAe9) |
+
+---
+
+## Ifx 与 wrapper program — 我们得到的反思
+
+**Ifx 不是要取代自研 wrapper program。** 本 demo 在探索：在**不必**为胶水逻辑单独部署链上程序时，SDK 侧编排能走多远 —— 以及边界在哪里。
+
+**Ifx 能做什么。** 当交易离 1232 字节上限还有余量时，Ifx 可以在 SDK 里串联 CPI：链上测量（`ifx_let`）、patch、条件分支、sponsor 偿还 —— 全在 TypeScript 里组合，改 planner 不必 program 升级。目标是**少为胶水专门写 wrapper**，更快试错。
+
+**本仓库 mainnet 实测：**
+
+| 路径 | 正确链上会计下能否塞进 1232B？ |
+|------|--------------------------------|
+| 单跳 sell + sponsored 偿还 | 能 — 见上文 [Sponsored sell](#主网示例交易) |
+| 两跳 swap（用户自付 gas） | 能 — Ifx `let` + patched 第二跳 |
+| 两跳 swap + sponsored 代付 | **不能** — 即便不算 smart-close 仍约 **1339B**；已**禁用**，不用 quote 快照静态金额（TOCTOU） |
+
+**结论摘要。**
+
+- **正确性优先。** 第二跳 `spendable_quote_in` 必须跟随同一笔 tx 内第一跳的实际 proceeds（`ifx_let`）。不为省字节牺牲这一点。
+- **Ifx 有编排开销。** 每条 Frame 指令都会占用 message 空间，叠在底层 DEX CPI 之上；tx 本来就很满时，这一点会被放大。
+- **Wrapper 与 Ifx 互补。** 字节成为瓶颈时，用薄 wrapper 把 let / patch / repay 收进单一 program 入口是自然的下一步 —— 不是 Ifx「输了」。
+- **集成对象很重要。** 两跳 + sponsor 偿还需要 DEX 两跳与胶水层都有 headroom。账户更少的 swap 接口或许能让 sponsored 两跳在 Ifx alone 下可行；我们未在此实现，但是开放方向。
+
+**如何理解本项目。** 一次真实 mainnet 集成上的 Ifx showcase，边界如实写出。不是对某个 DEX 的评判 —— 而是说明 **SDK 编排何时够用、何时该换别的手段**。
 
 ---
 

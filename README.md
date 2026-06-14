@@ -47,16 +47,16 @@ After **Sign & Send**, the right panel stays frozen until the user cancels in-wa
 
 ---
 
-## Why Ifx fits Pump.fun
+## What this demo orchestrates with Ifx
 
-| Requirement | Ifx capability | Canonical example |
-|-------------|----------------|-------------------|
+This repo integrates live Pump.fun bonding-curve **v2** instructions via [`@pump-fun/pump-sdk`](https://www.npmjs.com/package/@pump-fun/pump-sdk) and wires them with [`@ifx-run/sdk`](https://www.npmjs.com/package/@ifx-run/sdk) ([source](https://github.com/ifx-run/ifx/tree/main/sdk)):
+
+| Pattern | Ifx capability | Reference |
+|---------|----------------|-----------|
 | Close ATA only when balance is 0 after sell | `ifx_let` + `ifx_if_else` → CloseAccount or Skip | [dust-destroy-token2022](https://github.com/ifx-run/ifx/blob/main/sdk/examples/dust-destroy-token2022.ts) |
-| A → quote → B hop-2 amount from hop-1 output | Static hop-1 → `let` intermediate quote → `rawCpiPatch` hop-2 | [two-hop-token-swap](https://github.com/ifx-run/ifx/blob/main/sdk/examples/two-hop-token-swap.ts) |
-| Sponsor rent/fee when user SOL is low; repay on sell | Baseline `let` → idempotent ATA → patched `SystemProgram.transfer` | [sponsored_buy](https://github.com/ifx-run/ifx/blob/main/tests/sponsored_buy.ts) |
-| Patch Pump `sell_v2` / `buy_exact_quote_in_v2` fields | `rawCpi` + documented `data_offset` | [raw-cpi-patches](https://github.com/ifx-run/ifx/blob/main/docs/raw-cpi-patches.md) |
-
-Off-chain templates and curve math: [`@pump-fun/pump-sdk`](https://www.npmjs.com/package/@pump-fun/pump-sdk). On-chain orchestration: [`@ifx-run/sdk`](https://www.npmjs.com/package/@ifx-run/sdk) ([source](https://github.com/ifx-run/ifx/tree/main/sdk)).
+| Hop-2 amount from hop-1 output (same quote pool) | `let` → `rawCpiPatch` on hop-2 | [two-hop-token-swap](https://github.com/ifx-run/ifx/blob/main/sdk/examples/two-hop-token-swap.ts) |
+| Sponsor repay from sell proceeds (single hop) | patched `SystemProgram.transfer` | [sponsored_buy](https://github.com/ifx-run/ifx/blob/main/tests/sponsored_buy.ts) |
+| Patch Pump instruction fields at build time | `rawCpi` + `data_offset` | [raw-cpi-patches](https://github.com/ifx-run/ifx/blob/main/docs/raw-cpi-patches.md) |
 
 ---
 
@@ -68,6 +68,31 @@ Transactions assembled by this stack on Solana mainnet:
 |------|---------|
 | **Two-hop swap** — sell token A, Ifx `let` + patched `buy_exact_quote_in_v2` for token B in one tx | [2Q41RL3bW5BaNMW19RqGRNnoz3t4vuApVKVxPSN38rjLAG3dVaQDAtsjvLHPsLuapFjxxT2dzFovpFePHhesdegT](https://solscan.io/tx/2Q41RL3bW5BaNMW19RqGRNnoz3t4vuApVKVxPSN38rjLAG3dVaQDAtsjvLHPsLuapFjxxT2dzFovpFePHhesdegT) |
 | **Sponsored sell** — sponsor co-signs as fee payer; patched SOL repay from sell proceeds | [4VEQXHs176NLA5pbjL16hT7Ly4WWWC83P1VQGYXT416tJAS5APirSQbDaeXftSqKnotoCfkWtZBYYoYu64QgNAe9](https://solscan.io/tx/4VEQXHs176NLA5pbjL16hT7Ly4WWWC83P1VQGYXT416tJAS5APirSQbDaeXftSqKnotoCfkWtZBYYoYu64QgNAe9) |
+
+---
+
+## Ifx vs wrapper programs — what we learned
+
+**Ifx is not meant to replace a custom wrapper program.** This demo explores how much multi-step glue you can express in the SDK **without** deploying your own on-chain orchestrator — and where that stops.
+
+**Where Ifx helps.** When a transaction still has room under Solana’s 1232-byte limit, Ifx can chain CPIs with on-chain measurement (`ifx_let`), patches, conditional branches, and sponsor repay — all from TypeScript, without a program redeploy when the planner changes. The point is to **avoid writing a wrapper for glue alone** and to try compositions faster.
+
+**What we measured building this repo (mainnet):**
+
+| Flow | Fits 1232B with correct on-chain accounting? |
+|------|-----------------------------------------------|
+| Single-hop sell + sponsored repay | Yes — see [sponsored sell](#example-transactions-mainnet) above |
+| Two-hop swap (self-paid gas) | Yes — Ifx `let` + patched hop-2 |
+| Two-hop swap + sponsored gas | **No** — ~1339B even without smart-close; **disabled** rather than static quote-time amounts (TOCTOU risk) |
+
+**Takeaways.**
+
+- **Correctness first.** Hop-2 `spendable_quote_in` must follow actual hop-1 proceeds in the same tx (`ifx_let`). We do not trade that for bytes.
+- **Ifx adds orchestration overhead.** Each Frame instruction costs message space on top of the underlying DEX CPIs. That is fine until the tx is already full.
+- **Wrapper programs and Ifx are complements.** When byte budget is the bottleneck, a thin wrapper that collapses let / patch / repay into one program entrypoint is a natural next step — not a failure of Ifx.
+- **Venue matters.** A two-hop route with sponsor repay needs headroom in *both* the DEX legs and the glue layer. A simpler swap interface (fewer CPI accounts per hop) may make sponsored two-hop feasible with Ifx alone; we have not built that here, but it is an open direction.
+
+**How to read this project.** An Ifx showcase on a real mainnet integration — with limits stated plainly. Not a verdict on any particular DEX — a note on **when SDK-side orchestration is enough, and when to reach for something else**.
 
 ---
 
