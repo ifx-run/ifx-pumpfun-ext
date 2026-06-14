@@ -226,8 +226,8 @@ export async function resolveSponsorDecision(
   }
 
   const minProceeds = minProceedsForRepay(quote, mode, side, slippageBps);
-  const serviceFeeRaw = BigInt(quote.serviceFeeRaw);
-  if (!proceedsCoverRepay(minProceeds, serviceFeeRaw, plan.repayLamports)) {
+  const feeOnMin = applyBps(minProceeds, config.serviceFee.bps);
+  if (!proceedsCoverRepay(minProceeds, feeOnMin, plan.repayLamports)) {
     throw new Error(GAS_INSUFFICIENT_ERROR);
   }
 

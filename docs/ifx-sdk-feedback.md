@@ -6,7 +6,9 @@ Feedback from building and shipping the **ifx-pumpfun-ext** showcase on Solana m
 
 **Context:** Pump.fun bonding-curve v2 buy/sell/swap, conditional ATA close, platform fee, SOL sponsor + repay — all orchestrated with Ifx in one v0 transaction.
 
-**SDK version referenced:** `@ifx-run/sdk` ^0.1.0 (mainnet program `ifxmwWVVZ…`).
+**SDK version referenced:** `@ifx-run/sdk` **0.1.1+** (mainnet program `ifxmwWVVZ…`). Items in §2 were addressed in **0.1.1**; this repo tracks that release.
+
+**Adopted in this repo (0.1.1):** duck-typed `LetAccountInput` (removed `asIfxLetAccount`), `U64Binding` from SDK, `FrameScratch.forPublicFrame()`, `ifxIxHint` in tx inspector.
 
 ---
 
@@ -160,8 +162,8 @@ Integrators maintain constants against their target IDL; SDK docs can explain **
 
 | File | Role |
 |------|------|
-| `src/ifx/let-account.ts` | PublicKey workaround (remove after SDK fix) |
-| `src/ifx/frames.ts` | Public Frame scratch |
+| `src/ifx/frames.ts` | `FrameScratch.forPublicFrame()` |
+| `src/util/tx-inspect.ts` | `ifxIxHint` from SDK |
 | `src/ifx/planner/*.ts` | **Business-layer** planners |
 | `src/pump/patch-offsets.ts` | **Pump-specific** patch offset |
 | `src/ifx/build.ts` | **Integrator** tryCompile / size gate |

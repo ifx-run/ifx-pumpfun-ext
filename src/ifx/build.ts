@@ -18,6 +18,7 @@ import {
   type CloseAtaCandidate,
 } from "../ifx/planner/close-ata.js";
 import { serviceFeeTransferIx } from "../ifx/planner/service-fee.js";
+import { appendSellWithDynamicServiceFee } from "../ifx/planner/sell.js";
 import {
   appendSponsorRepay,
 } from "../ifx/planner/sponsor.js";
@@ -29,7 +30,6 @@ import { resolveTokens } from "../pump/resolve.js";
 import {
   buyExactQuoteInV2Instruction,
   idempotentAtaCreate,
-  sellV2Instruction,
   userBaseAta,
   userQuoteAta,
 } from "../pump/instructions.js";
@@ -338,7 +338,7 @@ async function buildSingleHopTransaction(
   const user = new PublicKey(req.userPubkey);
   const accounts = await loadTokenBuildAccounts(pump, config, req.mintA);
   const feeRecipient = new PublicKey(config.serviceFee.pubkey);
-  const feeRaw = BigInt(quote.serviceFeeRaw);
+  const serviceFeeBps = config.serviceFee.bps;
   const { scratch, framePubkey } = scratchForBuild(
     config.ifx.publicFrames,
     config.ifx.programId
@@ -362,6 +362,7 @@ async function buildSingleHopTransaction(
   const side = effectiveTradeSide(req.mode, req.side);
 
   if (side === "buy") {
+    const feeRaw = BigInt(quote.serviceFeeRaw);
     for (const spec of buyAtaSpecs(accounts)) {
       tx.add(idempotentAtaCreate(user, user, spec.mint, spec.tokenProgram));
     }
@@ -395,47 +396,34 @@ async function buildSingleHopTransaction(
       })
     );
   } else {
-    tx.add(
-      await sellV2Instruction({
-        global: accounts.global,
-        bondingCurve: accounts.bondingCurve,
-        mint: accounts.mint,
-        user,
-        baseTokenProgram: accounts.baseTokenProgram,
-        quoteMint: accounts.quoteMint,
-        quoteTokenProgram: accounts.quoteTokenProgram,
-        baseAmountIn: BigInt(quote.inputRaw),
-        minQuoteOut: BigInt(quote.minOutputRaw),
-      })
-    );
-
-    if (feeRaw > 0n) {
-      tx.add(
-        serviceFeeTransferIx({
-          quoteLabel: quote.serviceFeeLabel,
-          feeRaw,
-          user,
-          userQuoteAta: quoteAtaPk,
-          recipient: feeRecipient,
-          quoteMint: accounts.quoteMint,
-          quoteTokenProgram: accounts.quoteTokenProgram,
-        })
-      );
-    }
+    const sellTail: TransactionInstruction[] = [];
+    const { quoteDelta, fee } = await appendSellWithDynamicServiceFee(sellTail, {
+      scratch,
+      user,
+      accounts,
+      quoteLabel: quote.serviceFeeLabel,
+      userQuoteAta: quoteAtaPk,
+      baseAmountIn: BigInt(quote.inputRaw),
+      minQuoteOut: BigInt(quote.minOutputRaw),
+      serviceFeeBps,
+      feeRecipient,
+      measureProceeds: sponsor.active && quote.serviceFeeLabel === "SOL",
+    });
+    tx.add(...sellTail);
 
     if (sponsor.active && quote.serviceFeeLabel === "SOL") {
-      if (
-        BigInt(quote.minOutputRaw) - feeRaw <
-        sponsor.repayLamports
-      ) {
-        throw new Error(
-          "Insufficient SOL for transaction gas and rent — wallet balance is too low and trade proceeds cannot cover fees"
-        );
-      }
       const sponsorIxs: TransactionInstruction[] = [];
       appendSponsorRepay(scratch, sponsorIxs, user, sponsor.pubkey, {
         txFeeLamports: sponsor.txFeeLamports,
         repayBufferPercent: config.sponsor.repayBufferPercent,
+        ...(quoteDelta
+          ? {
+              proceeds: {
+                quoteDelta,
+                ...(fee ? { serviceFee: fee } : {}),
+              },
+            }
+          : {}),
       });
       tx.add(...sponsorIxs);
     }

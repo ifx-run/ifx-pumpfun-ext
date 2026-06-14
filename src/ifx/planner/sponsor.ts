@@ -3,6 +3,7 @@ import {
   structuredCpi,
   structuredCpiPatch,
   type FrameScratch,
+  type U64Binding,
 } from "@ifx-run/sdk";
 import {
   getAssociatedTokenAddressSync,
@@ -16,13 +17,9 @@ import {
 } from "@solana/web3.js";
 
 import type { AtaSpec } from "../../sponsor/ata-specs.js";
-import { asIfxLetAccount } from "../let-account.js";
 
 export type { AtaSpec } from "../../sponsor/ata-specs.js";
-
-/** u64 binding stored on Frame tape between let batches. */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type U64Binding = any;
+export type { U64Binding } from "@ifx-run/sdk";
 
 function userAta(
   owner: PublicKey,
@@ -69,7 +66,7 @@ export function appendSponsorAtaBootstrap(
 
   const baseline = scratch.letBuilder();
   const befores = specs.map((s) =>
-    baseline.lamports(asIfxLetAccount(userAta(user, s.mint, s.tokenProgram)))
+    baseline.lamports(userAta(user, s.mint, s.tokenProgram))
   );
   out.push(baseline.buildIx());
 
@@ -82,7 +79,7 @@ export function appendSponsorAtaBootstrap(
   for (let i = 0; i < specs.length; i++) {
     const spec = specs[i]!;
     const afterLamports = after.lamports(
-      asIfxLetAccount(userAta(user, spec.mint, spec.tokenProgram))
+      userAta(user, spec.mint, spec.tokenProgram)
     );
     const delta = after.letEval(expr.sub(afterLamports, befores[i]!));
     total = after.letEval(expr.add(total, delta));
@@ -101,6 +98,8 @@ export function appendSponsorRepay(
     txFeeLamports: bigint;
     repayBufferPercent: number;
     ataCost?: U64Binding;
+    /** When set, assert proceeds cover service fee + repay before transfer. */
+    proceeds?: { quoteDelta: U64Binding; serviceFee?: U64Binding };
   }
 ): void {
   const repayBatch = scratch.letBuilder();
@@ -116,6 +115,16 @@ export function appendSponsorRepay(
     )
   );
   out.push(repayBatch.buildIx());
+
+  if (opts.proceeds) {
+    appendProceedsCoverRepayAssert(
+      scratch,
+      out,
+      opts.proceeds.quoteDelta,
+      repay,
+      opts.proceeds.serviceFee
+    );
+  }
 
   appendSponsorRepayTransfer(scratch, out, user, sponsor, repay);
 }
@@ -141,7 +150,7 @@ export function appendSponsorRepayTransfer(
   );
 }
 
-/** Assert sell quote delta covers sponsor repay (swap hop1). */
+/** Assert sell proceeds cover sponsor repay (and optional on-chain service fee). */
 export function appendSponsorSettleAssert(
   scratch: FrameScratch,
   out: TransactionInstruction[],
@@ -149,4 +158,17 @@ export function appendSponsorSettleAssert(
   repay: U64Binding
 ): void {
   out.push(scratch.ixAssert(expr.ge(quoteDelta, repay)));
+}
+
+export function appendProceedsCoverRepayAssert(
+  scratch: FrameScratch,
+  out: TransactionInstruction[],
+  quoteDelta: U64Binding,
+  repay: U64Binding,
+  serviceFee?: U64Binding
+): void {
+  const required = serviceFee
+    ? expr.add(serviceFee, repay)
+    : repay;
+  out.push(scratch.ixAssert(expr.ge(quoteDelta, required)));
 }

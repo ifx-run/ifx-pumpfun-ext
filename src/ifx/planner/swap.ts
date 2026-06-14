@@ -2,16 +2,10 @@ import {
   expr,
   rawCpi,
   rawCpiPatch,
-  structuredCpi,
-  structuredCpiPatch,
   type FrameScratch,
+  type U64Binding,
 } from "@ifx-run/sdk";
-import { createTransferInstruction } from "@solana/spl-token";
-import {
-  PublicKey,
-  SystemProgram,
-  TransactionInstruction,
-} from "@solana/web3.js";
+import { PublicKey, TransactionInstruction } from "@solana/web3.js";
 
 import type { QuoteLabel } from "../../types/api.js";
 import type { TokenBuildAccounts } from "../../pump/accounts.js";
@@ -22,12 +16,14 @@ import {
   userBaseAta,
   userQuoteAta,
 } from "../../pump/instructions.js";
-import { quoteAta } from "../../pump/sdk.js";
 import { BUY_EXACT_QUOTE_IN_V2_SPENDABLE_QUOTE_IN_OFFSET } from "../../pump/patch-offsets.js";
 import { minOutRaw } from "../../util/amount.js";
 import { swapHop2AtaSpecs } from "../../sponsor/ata-specs.js";
-import { asIfxLetAccount } from "../let-account.js";
-import type { U64Binding } from "./sponsor.js";
+import {
+  appendProceedsAfterSell,
+  appendQuoteProceedsBaseline,
+  type QuoteProceedsAccount,
+} from "./service-fee.js";
 
 export type SwapBuildParams = {
   scratch: FrameScratch;
@@ -41,30 +37,6 @@ export type SwapBuildParams = {
   feeRecipient: PublicKey;
   serviceFeeBps: number;
 };
-
-function patchedSolTransfer(
-  scratch: FrameScratch,
-  from: PublicKey,
-  to: PublicKey,
-  amount: ReturnType<FrameScratch["letConstU64"]>
-): TransactionInstruction {
-  return scratch.ixCpi(
-    structuredCpi(
-      SystemProgram.transfer({ fromPubkey: from, toPubkey: to, lamports: 0 }),
-      structuredCpiPatch.systemTransfer(amount)
-    ).build()
-  );
-}
-
-function patchedTokenTransfer(
-  scratch: FrameScratch,
-  template: TransactionInstruction,
-  amount: ReturnType<FrameScratch["letConstU64"]>
-): TransactionInstruction {
-  return scratch.ixCpi(
-    structuredCpi(template, structuredCpiPatch.tokenTransfer(amount)).build()
-  );
-}
 
 /** A → quote → B: sell hop1, on-chain fee split, patched buy hop2. */
 export async function appendSwapInstructions(
@@ -101,12 +73,13 @@ export async function appendSwapInstructions(
     out.push(idempotentAtaCreate(user, user, spec.mint, spec.tokenProgram));
   }
 
-  const baselineBatch = scratch.letBuilder();
-  const quoteBefore =
-    quoteLabel === "SOL"
-      ? baselineBatch.lamports(asIfxLetAccount(user))
-      : baselineBatch.splTokenAmount(asIfxLetAccount(quoteAtaPk));
-  out.push(baselineBatch.buildIx());
+  const proceedsAccount: QuoteProceedsAccount = {
+    quoteLabel,
+    user,
+    userQuoteAta: quoteAtaPk,
+  };
+
+  const quoteBefore = appendQuoteProceedsBaseline(scratch, out, proceedsAccount);
 
   out.push(
     await sellV2Instruction({
@@ -122,42 +95,14 @@ export async function appendSwapInstructions(
     })
   );
 
-  const afterSell = scratch.letBuilder();
-  const quoteAfter =
-    quoteLabel === "SOL"
-      ? afterSell.lamports(asIfxLetAccount(user))
-      : afterSell.splTokenAmount(asIfxLetAccount(quoteAtaPk));
-  const quoteDelta = afterSell.letEval(expr.sub(quoteAfter, quoteBefore));
-  const fee = afterSell.letEval(
-    expr.bpsMulFloor(quoteDelta, expr.u64(serviceFeeBps))
-  );
-  const netQuote: U64Binding = afterSell.letEval(expr.sub(quoteDelta, fee));
-
-  out.push(afterSell.buildIx());
-
-  if (quoteLabel === "SOL") {
-    out.push(patchedSolTransfer(scratch, user, feeRecipient, fee));
-  } else {
-    const operatorQuoteAta = quoteAta(
-      feeRecipient,
-      quoteMint,
-      quoteTokenProgram
-    );
-    out.push(
-      patchedTokenTransfer(
-        scratch,
-        createTransferInstruction(
-          quoteAtaPk,
-          operatorQuoteAta,
-          user,
-          0,
-          [],
-          quoteTokenProgram
-        ),
-        fee
-      )
-    );
-  }
+  const { netQuote } = appendProceedsAfterSell(scratch, out, {
+    account: proceedsAccount,
+    quoteBefore,
+    serviceFeeBps,
+    feeRecipient,
+    quoteMint,
+    quoteTokenProgram,
+  });
 
   const hop2Template = await buyExactQuoteInV2Instruction({
     global: accountsB.global,
@@ -178,7 +123,7 @@ export async function appendSwapInstructions(
         patches: [
           rawCpiPatch(
             BUY_EXACT_QUOTE_IN_V2_SPENDABLE_QUOTE_IN_OFFSET,
-            netQuote
+            netQuote!
           ),
         ],
       }).build()

@@ -2,6 +2,7 @@ import {
   type AddressLookupTableAccount,
   type VersionedTransaction,
 } from "@solana/web3.js";
+import { ifxIxHint } from "@ifx-run/sdk";
 
 import type { TxInspection, TxInstructionInspection } from "../types/api.js";
 
@@ -20,17 +21,6 @@ const PUMP_IX: Record<string, string> = {
   "5df6823ce7e940b2": "sell_v2",
   "38fc74089edfcd5f": "buy_exact_sol_in",
 };
-
-const IFX_IX = [
-  "ifx_create_frame",
-  "ifx_close_frame",
-  "ifx_reset_frame",
-  "ifx_let",
-  "ifx_assert",
-  "ifx_assert_multi",
-  "ifx_patched_cpi",
-  "ifx_if_else",
-] as const;
 
 function programLabel(programId: string, ifxProgramId?: string): string {
   if (ifxProgramId && programId === ifxProgramId) return "Ifx";
@@ -93,9 +83,7 @@ function decodeInstructionHint(
     programId === "ifxmwWVVZDmXN2DUVf7wtJYCXTRY4QsL5rzmNkXzxbj" ||
     programId.startsWith("ifx");
   if (isIfx && data.length >= 1) {
-    const name = IFX_IX[data[0]!];
-    if (name) return name;
-    return `Ifx (disc ${data[0]})`;
+    return ifxIxHint(data) ?? `Ifx (disc ${data[0]})`;
   }
 
   return undefined;

@@ -63,7 +63,7 @@ ifx-pumpfun-ext/
 **Public Frames (`ifx/frames.ts`)** — pubkey list only:
 
 1. **Pick** — uniform random from `config.ifx.publicFrames`.
-2. **Scratch** — `new FrameScratch(pubkey, DEFAULT_TAPE_LEN, 0, 0, programId)`; first ix `ixReset()`.
+2. **Scratch** — `FrameScratch.forPublicFrame({ framePubkey, programId, tapeLen: DEFAULT_TAPE_LEN })`; first ix `ixReset()`.
 3. No Frame RPC, no `decodeFrameAccount`, no startup load step.
 
 - `ifx/planner/sell.ts` — exact base `sell_v2` + conditional close + fee after sell.

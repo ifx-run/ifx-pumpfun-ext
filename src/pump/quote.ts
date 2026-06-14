@@ -91,7 +91,7 @@ async function quoteSell(
     serviceFeeRaw: fee.toString(),
     serviceFeeLabel: token.quoteLabel,
     netQuoteRaw: netQuote.toString(),
-    route: ["pump.sell_v2", "service_fee", "ifx.smart_close?"],
+    route: ["pump.sell_v2", "ifx.service_fee", "ifx.smart_close?"],
     ixKind: "sell_v2",
   };
 }

@@ -6,7 +6,9 @@
 
 **背景：** Pump.fun bonding curve v2 买卖/两跳互换、条件关 ATA、平台费、SOL sponsor 代付与偿还 —— 均在单笔 v0 交易内由 Ifx 编排完成。
 
-**参考 SDK 版本：** `@ifx-run/sdk` ^0.1.0（mainnet program `ifxmwWVVZ…`）。
+**参考 SDK 版本：** `@ifx-run/sdk` **0.1.1+**（mainnet program `ifxmwWVVZ…`）。§2 中 SDK 应改项已在 **0.1.1** 落地；本仓库已跟进。
+
+**本仓库已跟进（0.1.1）：** 移除 `asIfxLetAccount`、使用 SDK 的 `U64Binding`、`FrameScratch.forPublicFrame()`、inspector 改用 `ifxIxHint`。
 
 ---
 
@@ -163,8 +165,8 @@ export const BUY_EXACT_QUOTE_IN_V2_SPENDABLE_QUOTE_IN_OFFSET = 8;
 
 | 文件 | 说明 |
 |------|------|
-| `src/ifx/let-account.ts` | PublicKey workaround（SDK 修后可删） |
-| `src/ifx/frames.ts` | 公共 Frame scratch |
+| `src/ifx/frames.ts` | `FrameScratch.forPublicFrame()` |
+| `src/util/tx-inspect.ts` | SDK `ifxIxHint` |
 | `src/ifx/planner/*.ts` | **业务层** planner，非 SDK 范围 |
 | `src/pump/patch-offsets.ts` | **Pump 专用** patch offset |
 | `src/ifx/build.ts` | **集成方** tryCompile / 体积门控 |

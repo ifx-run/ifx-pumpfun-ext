@@ -208,7 +208,7 @@ This project **does not create Frames** and **does not fetch or decode Frame acc
 }
 ```
 
-**Per build:** pick one pubkey uniformly at random from `publicFrames` (single entry → always that Frame), `new FrameScratch(framePk, DEFAULT_TAPE_LEN)`, prepend `ixReset()`.
+**Per build:** pick one pubkey uniformly at random from `publicFrames` (single entry → always that Frame), `FrameScratch.forPublicFrame({ framePubkey, programId })`, prepend `ixReset()`.
 
 **Not used:** `decodeFrameAccount`, startup Frame RPC batch, tape-length config, Frame cache files.
 

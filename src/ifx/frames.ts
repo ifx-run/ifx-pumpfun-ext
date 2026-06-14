@@ -9,15 +9,10 @@ export function scratchForBuild(
   programId: string
 ): { scratch: FrameScratch; framePubkey: string } {
   const framePubkey = publicFrames[randomInt(publicFrames.length)]!;
-  const frame = new PublicKey(framePubkey);
-  const program = new PublicKey(programId);
-  const scratch = new FrameScratch(
-    frame,
-    DEFAULT_TAPE_LEN,
-    0,
-    0,
-    program,
-    frame
-  );
+  const scratch = FrameScratch.forPublicFrame({
+    framePubkey: new PublicKey(framePubkey),
+    programId: new PublicKey(programId),
+    tapeLen: DEFAULT_TAPE_LEN,
+  });
   return { scratch, framePubkey };
 }
