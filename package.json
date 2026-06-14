@@ -1,9 +1,25 @@
 {
   "name": "ifx-pumpfun-ext",
   "version": "0.1.0",
-  "private": true,
-  "description": "Pump.fun trading showcase powered by Ifx orchestration",
+  "description": "Pump.fun bonding-curve trading showcase powered by Ifx orchestration",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ifx-run/ifx-pumpfun-ext.git"
+  },
+  "homepage": "https://github.com/ifx-run/ifx-pumpfun-ext#readme",
+  "bugs": {
+    "url": "https://github.com/ifx-run/ifx-pumpfun-ext/issues"
+  },
+  "keywords": [
+    "solana",
+    "pump.fun",
+    "ifx",
+    "trading",
+    "defi",
+    "bonding-curve"
+  ],
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
@@ -14,12 +30,11 @@
   "engines": {
     "node": ">=20"
   },
-  "license": "MIT",
   "dependencies": {
     "@coral-xyz/anchor": "^0.31.1",
     "@fastify/cors": "^11.2.0",
     "@fastify/static": "^9.1.3",
-    "@ifx-run/sdk": "file:../ifx/sdk",
+    "@ifx-run/sdk": "^0.1.0",
     "@pump-fun/pump-sdk": "^1.36.0",
     "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": "^1.98.4",
