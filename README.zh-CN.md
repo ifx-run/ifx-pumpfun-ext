@@ -67,7 +67,7 @@
 | 场景 | Solscan |
 |------|---------|
 | **两跳 swap** — 同一笔 tx 内卖 A，Ifx `let` + patched `buy_exact_quote_in_v2` 买 B | [2Q41RL3bW5BaNMW19RqGRNnoz3t4vuApVKVxPSN38rjLAG3dVaQDAtsjvLHPsLuapFjxxT2dzFovpFePHhesdegT](https://solscan.io/tx/2Q41RL3bW5BaNMW19RqGRNnoz3t4vuApVKVxPSN38rjLAG3dVaQDAtsjvLHPsLuapFjxxT2dzFovpFePHhesdegT) |
-| **Sponsored sell** — sponsor 代付 gas；卖出 proceeds 经 patched transfer 偿还 | [4VEQXHs176NLA5pbjL16hT7Ly4WWWC83P1VQGYXT416tJAS5APirSQbDaeXftSqKnotoCfkWtZBYYoYu64QgNAe9](https://solscan.io/tx/4VEQXHs176NLA5pbjL16hT7Ly4WWWC83P1VQGYXT416tJAS5APirSQbDaeXftSqKnotoCfkWtZBYYoYu64QgNAe9) |
+| **Sponsored sell** — sponsor 代付 gas；卖出 proceeds 经 patched transfer 偿还 | [3XaMR63y9q5aXdKE9aJqJNCgzuuY6JaRJimNU4PjCq2q6piLrLP1iNw9ZfrQnCqhQKBCmdtyNM3p8r4As4r8rhE3](https://solscan.io/tx/3XaMR63y9q5aXdKE9aJqJNCgzuuY6JaRJimNU4PjCq2q6piLrLP1iNw9ZfrQnCqhQKBCmdtyNM3p8r4As4r8rhE3) |
 
 ---
 
