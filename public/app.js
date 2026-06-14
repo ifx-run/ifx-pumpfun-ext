@@ -11,9 +11,13 @@ let publicConfig = {
 let resolveState = null;
 let quoteAbort = null;
 let lastQuoteSnapshot = null;
+let lastBuilt = null;
 let lastQuoteExceedsBalance = false;
+let expiresAtMs = 0;
 let walletProvider = null;
 let walletPubkey = null;
+/** SOL + USDC only — refreshed on load / connect / interval. */
+let quoteWallet = null;
 
 const BLOCKHASH_RETRIES = 3;
 const MIN_MINT_LEN = 32;
@@ -21,6 +25,7 @@ const MIN_MINT_LEN = 32;
 let debounceTimer;
 let resolveDebounceTimer;
 let balanceRefreshTimer;
+let blockhashTimer = null;
 let resolveInFlight = false;
 let resolvePending = false;
 
@@ -61,53 +66,74 @@ function formatQuoteAsset(rawStr, label) {
   }
 }
 
-function quoteStatRow(term, value, hint = "") {
+function summaryStatRow(term, value, hint = "") {
   const hintHtml = hint
-    ? `<span class="quote-stat-hint">${hint}</span>`
+    ? `<span class="trade-stat-hint">${hint}</span>`
     : "";
-  return `<div class="quote-stat"><dt>${term}</dt><dd>${value}${hintHtml}</dd></div>`;
+  return `<div class="trade-stat"><dt>${term}</dt><dd>${value}${hintHtml}</dd></div>`;
 }
 
-function setQuotePanelState(state) {
-  $("quotePanel").className = `quote-panel quote-panel--${state}`;
+function mintShortLabel(fieldId, fallback) {
+  const v = $(fieldId).value.trim();
+  return v.length >= 8 ? shortPubkey(v) : fallback;
 }
 
-function renderQuoteIdle(message = "Enter amount to get a quote.") {
-  setQuotePanelState("idle");
-  $("quoteHeroEyebrow").textContent = "Quote";
-  $("quoteHeroAmount").textContent = "—";
-  $("quoteHeroUnit").textContent = "";
-  $("quoteHeroMin").textContent = message;
-  $("quoteHeroMin").className = "quote-hero-min muted";
-  $("quoteStats").classList.add("hidden");
-  $("quoteStats").innerHTML = "";
-  $("quoteAlerts").innerHTML = "";
-  $("quoteTech").classList.add("hidden");
-  $("quoteTechBody").textContent = "";
+function setTradeSummaryState(state) {
+  $("tradeSummary").className = `trade-summary trade-summary--${state}`;
+}
+
+function clearTradeSummaryExchange() {
+  $("summaryPayAmount").textContent = "—";
+  $("summaryPayUnit").textContent = "";
+  $("summaryReceiveAmount").textContent = "—";
+  $("summaryReceiveUnit").textContent = "";
+}
+
+function renderQuoteIdle(message = "Enter amount on the left to preview.") {
+  setTradeSummaryState("idle");
+  clearTradeSummaryExchange();
+  $("summarySub").textContent = message;
+  $("summarySub").className = "trade-summary-sub muted";
+  $("summaryStats").classList.add("hidden");
+  $("summaryStats").innerHTML = "";
+  $("summaryAlerts").innerHTML = "";
+  $("summaryTech").classList.add("hidden");
+  $("summaryTechBody").textContent = "";
 }
 
 function renderQuoteLoading() {
-  setQuotePanelState("loading");
-  $("quoteHeroEyebrow").textContent = "Quoting…";
-  $("quoteHeroAmount").textContent = "…";
-  $("quoteHeroUnit").textContent = "";
-  $("quoteHeroMin").textContent = "";
-  $("quoteHeroMin").className = "quote-hero-min muted";
-  $("quoteStats").classList.add("hidden");
-  $("quoteAlerts").innerHTML = "";
-  $("quoteTech").classList.add("hidden");
+  setTradeSummaryState("loading");
+  $("summaryPayAmount").textContent = "…";
+  $("summaryPayUnit").textContent = "";
+  $("summaryReceiveAmount").textContent = "…";
+  $("summaryReceiveUnit").textContent = "";
+  $("summarySub").textContent = walletPubkey
+    ? "Fetching quote and assembling transaction…"
+    : "Fetching quote…";
+  $("summarySub").className = "trade-summary-sub muted";
+  $("summaryStats").classList.add("hidden");
+  $("summaryAlerts").innerHTML = "";
+  $("summaryTech").classList.add("hidden");
+  lastBuilt = null;
+  stopBlockhashCountdown();
+  renderInspectorBanner(null);
+  renderTxInspector(null, "Quoting & building…");
+  updateSignSendBtn();
 }
 
 function renderQuoteError(message) {
-  setQuotePanelState("error");
-  $("quoteHeroEyebrow").textContent = "Quote failed";
-  $("quoteHeroAmount").textContent = "—";
-  $("quoteHeroUnit").textContent = "";
-  $("quoteHeroMin").textContent = message;
-  $("quoteHeroMin").className = "quote-hero-min error";
-  $("quoteStats").classList.add("hidden");
-  $("quoteAlerts").innerHTML = "";
-  $("quoteTech").classList.add("hidden");
+  setTradeSummaryState("error");
+  clearTradeSummaryExchange();
+  $("summarySub").textContent = message;
+  $("summarySub").className = "trade-summary-sub error";
+  $("summaryStats").classList.add("hidden");
+  $("summaryAlerts").innerHTML = "";
+  $("summaryTech").classList.add("hidden");
+  lastBuilt = null;
+  stopBlockhashCountdown();
+  renderTxInspector(null, "Quote failed");
+  renderInspectorBanner(null);
+  updateSignSendBtn();
 }
 
 /** Which asset the input field spends and its on-chain balance. */
@@ -157,6 +183,110 @@ function shortPubkey(pk) {
   return `${pk.slice(0, 4)}…${pk.slice(-4)}`;
 }
 
+function walletBalanceChip(asset, amount) {
+  return `<div class="wallet-balance-chip">
+    <span class="wallet-balance-asset">${asset}</span>
+    <span class="wallet-balance-amount">${amount}</span>
+  </div>`;
+}
+
+function renderQuoteWalletBalances(wallet) {
+  const el = $("walletBalances");
+  if (!walletPubkey || !wallet) {
+    el.innerHTML = "";
+    el.classList.add("hidden");
+    return;
+  }
+  el.innerHTML = `<div class="wallet-balance-chips">${[
+    walletBalanceChip("SOL", wallet.solUi),
+    walletBalanceChip("USDC", wallet.usdcUi),
+  ].join("")}</div>`;
+  el.classList.remove("hidden");
+}
+
+async function refreshQuoteWalletBalances() {
+  if (!walletPubkey) {
+    quoteWallet = null;
+    renderQuoteWalletBalances(null);
+    return;
+  }
+  try {
+    quoteWallet = await api("/api/wallet/balances", { userPubkey: walletPubkey });
+    renderQuoteWalletBalances(quoteWallet);
+  } catch (e) {
+    logClientError("wallet-balances", e, { userPubkey: walletPubkey });
+  }
+}
+
+function renderTokenPanel(panelId, opts) {
+  const out = $(panelId);
+  if (!opts) {
+    out.innerHTML = "";
+    out.className = "token-panel hidden";
+    return;
+  }
+
+  if (opts.error) {
+    out.className = "token-panel token-panel--error";
+    out.textContent = opts.error;
+    out.classList.remove("hidden");
+    return;
+  }
+
+  if (opts.loading) {
+    out.className = "token-panel token-panel--loading";
+    out.textContent = "Resolving token…";
+    out.classList.remove("hidden");
+    return;
+  }
+
+  const { token, mintStr = "", baseBalance, swapNote } = opts;
+  if (!token) {
+    out.innerHTML = "";
+    out.className = "token-panel hidden";
+    return;
+  }
+
+  const mintLabel = mintStr.length >= 8 ? shortPubkey(mintStr) : "—";
+  const safeMint = mintStr.replace(/"/g, "&quot;");
+
+  let balanceBlock = "";
+  if (baseBalance != null) {
+    balanceBlock = `
+      <div class="token-panel-balance">
+        <span>Your balance</span>
+        <strong>${baseBalance}</strong>
+      </div>`;
+  } else if (walletPubkey) {
+    balanceBlock = `
+      <div class="token-panel-balance muted">
+        <span>Your balance</span>
+        <strong>0</strong>
+      </div>`;
+  } else {
+    balanceBlock = `<div class="token-panel-note muted">Connect wallet to see your balance</div>`;
+  }
+
+  let swapBlock = "";
+  if (swapNote) {
+    swapBlock = `<div class="token-panel-swap-flag ${swapNote.ok ? "ok" : "error"}">${swapNote.text}</div>`;
+  }
+
+  out.className = "token-panel";
+  out.innerHTML = `
+    <div class="token-panel-grid">
+      <span class="token-panel-k">Quote pool</span>
+      <span class="token-panel-v">${token.quoteLabel}</span>
+      <span class="token-panel-k">Decimals</span>
+      <span class="token-panel-v">${token.decimals}</span>
+      <span class="token-panel-k">Mint</span>
+      <code class="token-panel-v" title="${safeMint}">${mintLabel}</code>
+    </div>
+    ${balanceBlock}
+    ${swapBlock}`;
+  out.classList.remove("hidden");
+}
+
 function updateWalletUi() {
   const status = $("walletStatus");
   const connectBtn = $("connectBtn");
@@ -166,46 +296,167 @@ function updateWalletUi() {
     status.className = "wallet-status ok";
     connectBtn.classList.add("hidden");
     disconnectBtn.classList.remove("hidden");
+    renderQuoteWalletBalances(quoteWallet);
   } else {
     status.textContent = "Wallet not connected";
     status.className = "wallet-status muted";
     connectBtn.classList.remove("hidden");
     disconnectBtn.classList.add("hidden");
+    quoteWallet = null;
+    renderQuoteWalletBalances(null);
   }
-  updateBuildBtn();
+  updateSignSendBtn();
+}
+
+function stopBlockhashCountdown() {
+  if (blockhashTimer) {
+    clearInterval(blockhashTimer);
+    blockhashTimer = null;
+  }
+  expiresAtMs = 0;
+}
+
+function isBlockhashExpired() {
+  return expiresAtMs > 0 && Date.now() >= expiresAtMs;
+}
+
+function startBlockhashCountdown(blockhash) {
+  stopBlockhashCountdown();
+  expiresAtMs = blockhash?.expiresAtMs ?? 0;
+  updateSignSendBtn();
+  if (!expiresAtMs) return;
+  blockhashTimer = setInterval(updateSignSendBtn, 1000);
+}
+
+function updateSignSendBtn() {
+  const btn = $("signSendBtn");
+  const countdown = $("blockhashCountdown");
+
+  if (!walletPubkey) {
+    btn.disabled = true;
+    btn.textContent = "Sign & Send";
+    countdown.classList.add("hidden");
+    return;
+  }
+
+  if (lastQuoteExceedsBalance || !lastQuoteSnapshot) {
+    btn.disabled = true;
+    btn.textContent = "Sign & Send";
+    countdown.classList.add("hidden");
+    return;
+  }
+
+  if (!lastBuilt) {
+    btn.disabled = true;
+    btn.textContent = "Sign & Send";
+    countdown.classList.add("hidden");
+    return;
+  }
+
+  if (isBlockhashExpired()) {
+    btn.disabled = false;
+    btn.textContent = "Quote & Build";
+    countdown.textContent = "Blockhash expired";
+    countdown.classList.remove("hidden");
+    countdown.classList.add("expired");
+    return;
+  }
+
+  btn.disabled = false;
+  btn.textContent = "Sign & Send";
+  countdown.classList.remove("expired");
+  countdown.classList.remove("hidden");
+  const secs = Math.max(0, Math.ceil((expiresAtMs - Date.now()) / 1000));
+  countdown.textContent = `Re-quote in ${secs}s`;
+}
+
+function applyPrepareResponse(data) {
+  lastQuoteSnapshot = snapshotFromQuote(data);
+  lastBuilt = data.build ?? null;
+
+  if (data.blockhash) {
+    startBlockhashCountdown(data.blockhash);
+  } else {
+    stopBlockhashCountdown();
+  }
+
+  renderQuote(data);
+  syncWalletFromQuote(data);
+
+  if (data.build?.inspection) {
+    const size = data.build.transactionSizeBytes ?? "?";
+    renderTxInspector(
+      data.build.inspection,
+      `Ready · ${size} B · inspect instructions below`
+    );
+    renderInspectorBanner(null);
+  } else if (data.buildSkippedReason === "no_wallet") {
+    renderTxInspector(null, "Connect wallet to preview transaction");
+    renderInspectorBanner(null);
+  } else if (data.buildSkippedReason === "exceeds_balance") {
+    renderTxInspector(null, "Input exceeds balance — cannot build");
+    renderInspectorBanner({
+      kind: "error",
+      title: "Cannot build",
+      message: data.inputLimit?.hint ?? "Input exceeds wallet balance.",
+    });
+  } else if (data.buildSkippedReason === "build_error") {
+    renderTxInspector(null, "Quote OK — build failed");
+    renderInspectorBanner({
+      kind: "error",
+      title: "Build failed",
+      message: data.buildError ?? "Transaction could not be assembled.",
+    });
+  } else {
+    renderTxInspector(null, "No transaction preview");
+    renderInspectorBanner(null);
+  }
+
+  updateSignSendBtn();
 }
 
 function renderResolvePanel(state) {
-  const out = $("resolveOut");
   if (!state) {
-    out.textContent = "";
-    out.className = "resolve-out muted";
+    renderTokenPanel("tokenAPanel", null);
+    renderTokenPanel("tokenBPanel", null);
     return;
   }
-  const a = state.tokenA;
-  let html = `<div class="ok">A: quote ${a.quoteLabel} · ${a.decimals} decimals</div>`;
-  if (state.wallet) {
-    const w = state.wallet;
-    html += `<div class="muted">Wallet: ${w.solUi} SOL · ${w.usdcUi} USDC`;
-    if (w.baseA) html += ` · ${w.baseA.ui} base A`;
-    html += "</div>";
-  }
+
+  const mintA = $("mintA").value.trim();
+  renderTokenPanel("tokenAPanel", {
+    token: state.tokenA,
+    mintStr: mintA,
+    baseBalance: state.wallet?.baseA?.ui ?? null,
+  });
+
   if (state.tokenB) {
-    const b = state.tokenB;
-    html += `<div>${state.swapEligible ? "✓" : "✗"} B: quote ${b.quoteLabel}`;
-    if (!state.swapEligible) {
-      html += ` — ${state.swapIneligibleReason}`;
-    }
-    html += "</div>";
+    const mintB = $("mintB").value.trim();
+    const swapText = state.swapEligible
+      ? "✓ Same quote pool — swap eligible"
+      : `✗ ${state.swapIneligibleReason ?? "Swap not eligible"}`;
+    renderTokenPanel("tokenBPanel", {
+      token: state.tokenB,
+      mintStr: mintB,
+      swapNote: { ok: state.swapEligible, text: swapText },
+    });
+  } else {
+    renderTokenPanel("tokenBPanel", null);
   }
-  out.innerHTML = html;
-  out.className = "resolve-out";
 }
 
 function syncWalletFromQuote(q) {
-  if (!q?.wallet || !resolveState) return;
-  resolveState.wallet = q.wallet;
-  renderResolvePanel(resolveState);
+  if (!q?.wallet) return;
+  quoteWallet = {
+    solRaw: q.wallet.solRaw,
+    solUi: q.wallet.solUi,
+    usdcRaw: q.wallet.usdcRaw,
+    usdcUi: q.wallet.usdcUi,
+  };
+  renderQuoteWalletBalances(quoteWallet);
+  if (resolveState) {
+    resolveState.wallet = q.wallet;
+    renderResolvePanel(resolveState);
+  }
   updateBalancePctButtons();
 }
 
@@ -215,7 +466,7 @@ function startBalanceRefreshTimer() {
   const intervalMs = publicConfig.balanceRefreshIntervalMs ?? 30_000;
   balanceRefreshTimer = setInterval(() => {
     if (document.hidden) return;
-    if ($("mintA").value.trim()) void refreshWalletState("interval");
+    void refreshWalletState("interval");
   }, intervalMs);
 }
 
@@ -226,25 +477,45 @@ function stopBalanceRefreshTimer() {
   }
 }
 
-/** Re-fetch token + wallet balances, then re-quote if amount is set. */
-async function refreshWalletState(_reason) {
+function cancelPendingQuote() {
+  clearTimeout(debounceTimer);
+  if (quoteAbort) {
+    quoteAbort.abort();
+    quoteAbort = null;
+  }
+}
+
+/** After a confirmed send — keep inspector result, stop auto re-quote. */
+function resetAfterSuccessfulSend() {
+  cancelPendingQuote();
+  $("inputAmount").value = "";
+  lastQuoteSnapshot = null;
+  lastBuilt = null;
+  lastQuoteExceedsBalance = false;
+  renderQuoteIdle("Enter a new amount to quote again.");
+  updateBalancePctButtons();
+}
+
+/** Re-fetch quote wallet balances; re-resolve mint if set. */
+async function refreshWalletState(_reason, opts = {}) {
+  const { skipQuote = false } = opts;
+  await refreshQuoteWalletBalances();
   const mintA = $("mintA").value.trim();
-  if (!mintA) return;
-  await doResolve({ quiet: true });
+  if (mintA) await doResolve({ quiet: true, skipQuote });
 }
 
 function scheduleResolve() {
   clearTimeout(resolveDebounceTimer);
   resolveDebounceTimer = setTimeout(() => {
     const mintA = $("mintA").value.trim();
-    if (!mintA || mintA.length < MIN_MINT_LEN) return;
+    if (!mintA || mintA.length < MIN_MINT_LEN) {
+      resolveState = null;
+      renderResolvePanel(null);
+      updateBalancePctButtons();
+      return;
+    }
     void doResolve();
   }, publicConfig.debounceMs ?? 300);
-}
-
-function updateBuildBtn() {
-  const btn = $("buildSignBtn");
-  btn.disabled = !(walletPubkey && lastQuoteSnapshot && !lastQuoteExceedsBalance);
 }
 
 function snapshotFromQuote(q) {
@@ -308,6 +579,7 @@ async function connectWallet() {
   walletPubkey = resp.publicKey.toString();
   updateWalletUi();
   startBalanceRefreshTimer();
+  await refreshQuoteWalletBalances();
   if ($("mintA").value.trim()) await doResolve();
   else scheduleQuote();
 }
@@ -340,15 +612,6 @@ function isBlockhashSendError(err) {
     msg.includes("block height exceeded") ||
     msg.includes("transaction expired")
   );
-}
-
-async function buildTransaction(body) {
-  return api("/api/tx/build", {
-    ...body,
-    userPubkey: walletPubkey,
-    priorityTier: $("priorityTier").value,
-    quoteSnapshot: lastQuoteSnapshot,
-  });
 }
 
 async function signAndSend(connection, built) {
@@ -581,7 +844,7 @@ function renderTxInspector(inspection, statusText) {
   wireCopyButtons(list);
 }
 
-async function doBuildSign() {
+async function doSignSend() {
   if (!walletPubkey) {
     renderInspectorBanner({
       kind: "error",
@@ -590,81 +853,58 @@ async function doBuildSign() {
     });
     return;
   }
-  if (!lastQuoteSnapshot) {
-    renderInspectorBanner({
-      kind: "error",
-      title: "Quote required",
-      message: "Quote first — build uses frozen quote amounts.",
-    });
-    return;
-  }
 
-  const trade = tradeBodyBase();
-  if (!trade.mintA || !trade.inputAmount) {
-    renderInspectorBanner({
-      kind: "error",
-      title: "Invalid input",
-      message: "Need mint A and input amount.",
-    });
-    return;
+  if (isBlockhashExpired() || !lastBuilt) {
+    await doQuote();
+    if (!lastBuilt || isBlockhashExpired()) return;
   }
 
   const connection = new Connection(publicConfig.rpcUrl, "confirmed");
-  const buildBody = { ...trade, userPubkey: walletPubkey };
 
   for (let attempt = 1; attempt <= BLOCKHASH_RETRIES; attempt++) {
-    renderInspectorBanner({
-      kind: "progress",
-      title: attempt > 1 ? "Rebuilding transaction" : "Building transaction",
-      message:
-        attempt > 1
-          ? `Blockhash expired — retry ${attempt}/${BLOCKHASH_RETRIES}…`
-          : "Assembling instructions and checking size…",
-    });
-    renderTxInspector(null, "Building…");
-
-    let built;
-    try {
-      built = await buildTransaction(buildBody);
-    } catch (e) {
-      logClientError("build", e, { buildBody, attempt, quoteSnapshot: lastQuoteSnapshot });
-      renderInspectorBanner({
-        kind: "error",
-        title: "Build failed",
-        message: e.message,
-      });
-      renderTxInspector(null, `Build failed: ${e.message}`);
-      return;
+    if (attempt > 1) {
+      await doQuote();
+      if (!lastBuilt) return;
     }
 
     renderInspectorBanner({
       kind: "progress",
       title: "Awaiting signature",
-      message: `${built.transactionSizeBytes ?? "?"} B · approve in wallet`,
+      message: `${lastBuilt.transactionSizeBytes ?? "?"} B · approve in wallet`,
     });
-    renderTxInspector(built.inspection, "Built — inspect instructions below");
 
-    const valid = await isBlockhashValid(connection, built.lastValidBlockHeight);
+    const valid = await isBlockhashValid(
+      connection,
+      lastBuilt.lastValidBlockHeight
+    );
     if (!valid) {
       if (attempt < BLOCKHASH_RETRIES) continue;
       renderInspectorBanner({
         kind: "error",
         title: "Blockhash expired",
-        message: "Try Build & sign again.",
+        message: "Click Quote & Build to refresh.",
       });
+      stopBlockhashCountdown();
+      updateSignSendBtn();
       return;
     }
 
     try {
-      const signature = await signAndSend(connection, built);
+      const signature = await signAndSend(connection, lastBuilt);
+      stopBlockhashCountdown();
       renderInspectorBanner({
         kind: "success",
         title: "Transaction confirmed",
-        built,
+        built: lastBuilt,
         signature,
       });
-      renderTxInspector(built.inspection, "Confirmed — inspect instructions below");
-      await refreshWalletState("tx-confirmed");
+      renderTxInspector(
+        lastBuilt.inspection,
+        "Confirmed — inspect instructions below"
+      );
+      resetAfterSuccessfulSend();
+      await refreshWalletState("tx-confirmed", { skipQuote: true });
+      updateSignSendBtn();
       return;
     } catch (e) {
       if (isBlockhashSendError(e) && attempt < BLOCKHASH_RETRIES) continue;
@@ -672,23 +912,25 @@ async function doBuildSign() {
         renderInspectorBanner({
           kind: "cancelled",
           title: "Cancelled in wallet",
-          message: "Transaction not sent. Unsigned build remains below.",
+          message: "Transaction not sent. Preview remains below.",
         });
-        renderTxInspector(built.inspection, "Cancelled — inspect unsigned tx below");
+        renderTxInspector(
+          lastBuilt.inspection,
+          "Cancelled — inspect unsigned tx below"
+        );
         return;
       }
       logClientError("sign-send", e, {
         attempt,
-        feePayer: built?.feePayer,
-        frameUsed: built?.frameUsed,
-        txBytes: built?.transaction?.length,
+        feePayer: lastBuilt?.feePayer,
+        frameUsed: lastBuilt?.frameUsed,
       });
       renderInspectorBanner({
         kind: "error",
         title: "Send failed",
         message: e.message ?? String(e),
       });
-      renderTxInspector(built.inspection, "Send failed — inspect tx below");
+      renderTxInspector(lastBuilt.inspection, "Send failed — inspect tx below");
       return;
     }
   }
@@ -726,8 +968,10 @@ async function swapMintFields() {
   mintA.value = mintB.value;
   mintB.value = tmp;
   lastQuoteSnapshot = null;
+  lastBuilt = null;
   lastQuoteExceedsBalance = false;
-  updateBuildBtn();
+  stopBlockhashCountdown();
+  updateSignSendBtn();
   if (mintA.value.trim()) await doResolve();
   else {
     resolveState = null;
@@ -738,9 +982,14 @@ async function swapMintFields() {
 }
 
 async function doResolve(opts = {}) {
-  const { quiet = false } = opts;
+  const { quiet = false, skipQuote = false } = opts;
   const mintA = $("mintA").value.trim();
-  if (!mintA) return;
+  if (!mintA) {
+    resolveState = null;
+    renderResolvePanel(null);
+    updateBalancePctButtons();
+    return;
+  }
 
   if (resolveInFlight) {
     resolvePending = true;
@@ -749,25 +998,36 @@ async function doResolve(opts = {}) {
   resolveInFlight = true;
 
   const mintB = $("mintB").value.trim();
-  const out = $("resolveOut");
   if (!quiet) {
-    out.textContent = "Resolving…";
-    out.className = "resolve-out muted";
+    renderTokenPanel("tokenAPanel", { loading: true });
+    if ($("mode").value === "swap" && mintB.length >= MIN_MINT_LEN) {
+      renderTokenPanel("tokenBPanel", { loading: true });
+    }
   }
+
   try {
     resolveState = await api("/api/token/resolve", {
       mintA,
       mintB: mintB || undefined,
       userPubkey: walletPubkey || undefined,
     });
+    if (resolveState.wallet) {
+      quoteWallet = {
+        solRaw: resolveState.wallet.solRaw,
+        solUi: resolveState.wallet.solUi,
+        usdcRaw: resolveState.wallet.usdcRaw,
+        usdcUi: resolveState.wallet.usdcUi,
+      };
+      renderQuoteWalletBalances(quoteWallet);
+    }
     renderResolvePanel(resolveState);
     updateBalancePctButtons();
-    scheduleQuote();
+    if (!skipQuote) scheduleQuote();
   } catch (e) {
     logClientError("resolve", e, { mintA, mintB });
     resolveState = null;
-    out.textContent = e.message;
-    out.className = "resolve-out error";
+    renderTokenPanel("tokenAPanel", { error: e.message });
+    renderTokenPanel("tokenBPanel", null);
     updateBalancePctButtons();
   } finally {
     resolveInFlight = false;
@@ -779,7 +1039,7 @@ async function doResolve(opts = {}) {
 }
 
 function renderQuote(q) {
-  setQuotePanelState("ready");
+  setTradeSummaryState("ready");
 
   const mode = $("mode").value;
   const side = $("side").value;
@@ -791,67 +1051,65 @@ function renderQuote(q) {
   const netUi = formatQuoteAsset(q.netQuoteRaw, q.serviceFeeLabel);
   const tokenADecimals = resolveState?.tokenA?.decimals ?? 6;
   const tokenBDecimals = resolveState?.tokenB?.decimals ?? 6;
+  const labelA = mintShortLabel("mintA", "Token A");
+  const labelB = mintShortLabel("mintB", "Token B");
 
-  let eyebrow;
-  let amount;
-  let unit;
+  let payAmount;
+  let payUnit;
+  let receiveAmount;
+  let receiveUnit;
   let minLine;
   const stats = [];
 
   if (mode === "swap") {
-    eyebrow = "Estimated receive";
-    amount = q.expectedOutputUi;
-    unit = "Token B";
+    payAmount = formatRawToUi(BigInt(q.inputRaw), tokenADecimals);
+    payUnit = labelA;
+    receiveAmount = q.expectedOutputUi;
+    receiveUnit = labelB;
     const minUi = formatRawToUi(BigInt(q.minOutputRaw), tokenBDecimals);
-    minLine = `Minimum ${minUi} Token B at ${slipPct}% slippage`;
-    const inputUi = formatRawToUi(BigInt(q.inputRaw), tokenADecimals);
-    stats.push(quoteStatRow("You pay", `${inputUi} Token A`));
+    minLine = `Min receive ${minUi} ${labelB} · ${slipPct}% slippage`;
     stats.push(
-      quoteStatRow(
+      summaryStatRow(
         "Platform fee",
         `${feeUi} ${q.serviceFeeLabel}`,
         feeHint
       )
     );
     stats.push(
-      quoteStatRow("To hop 2 buy", `${netUi} ${q.serviceFeeLabel}`)
+      summaryStatRow("To hop 2 buy", `${netUi} ${q.serviceFeeLabel}`)
     );
   } else if (side === "buy") {
-    eyebrow = "Estimated receive";
-    amount = q.expectedOutputUi;
-    unit = "tokens";
+    payAmount = formatQuoteAsset(q.inputRaw, q.serviceFeeLabel);
+    payUnit = q.serviceFeeLabel;
+    receiveAmount = q.expectedOutputUi;
+    receiveUnit = labelA;
     const minUi = formatRawToUi(BigInt(q.minOutputRaw), tokenADecimals);
-    minLine = `Minimum ${minUi} tokens at ${slipPct}% slippage`;
-    const payUi = formatQuoteAsset(q.inputRaw, q.serviceFeeLabel);
+    minLine = `Min receive ${minUi} ${labelA} · ${slipPct}% slippage`;
     stats.push(
-      quoteStatRow("You pay", `${payUi} ${q.serviceFeeLabel}`)
-    );
-    stats.push(
-      quoteStatRow(
+      summaryStatRow(
         "Platform fee",
         `${feeUi} ${q.serviceFeeLabel}`,
         feeHint
       )
     );
     stats.push(
-      quoteStatRow("To Pump buy", `${netUi} ${q.serviceFeeLabel}`)
+      summaryStatRow("To Pump buy", `${netUi} ${q.serviceFeeLabel}`)
     );
   } else {
-    eyebrow = "Estimated receive";
-    amount = netUi;
-    unit = q.serviceFeeLabel;
+    payAmount = formatRawToUi(BigInt(q.inputRaw), tokenADecimals);
+    payUnit = labelA;
+    receiveAmount = netUi;
+    receiveUnit = q.serviceFeeLabel;
     const minUi = formatQuoteAsset(q.minOutputRaw, q.serviceFeeLabel);
-    minLine = `Minimum ~${minUi} ${q.serviceFeeLabel} at ${slipPct}% slippage (gross, before fee)`;
-    const sellUi = formatRawToUi(BigInt(q.inputRaw), tokenADecimals);
-    stats.push(quoteStatRow("You sell", `${sellUi} tokens`));
+    minLine = `Min ~${minUi} ${q.serviceFeeLabel} gross · ${slipPct}% slippage`;
     stats.push(
-      quoteStatRow(
+      summaryStatRow(
         "Gross from Pump",
         `${q.expectedOutputUi} ${q.serviceFeeLabel}`
       )
     );
     stats.push(
-      quoteStatRow(
+      summaryStatRow(
         "Platform fee",
         `${feeUi} ${q.serviceFeeLabel}`,
         feeHint
@@ -859,14 +1117,15 @@ function renderQuote(q) {
     );
   }
 
-  $("quoteHeroEyebrow").textContent = eyebrow;
-  $("quoteHeroAmount").textContent = amount;
-  $("quoteHeroUnit").textContent = unit;
-  $("quoteHeroMin").textContent = minLine;
-  $("quoteHeroMin").className = "quote-hero-min muted";
+  $("summaryPayAmount").textContent = payAmount;
+  $("summaryPayUnit").textContent = payUnit;
+  $("summaryReceiveAmount").textContent = receiveAmount;
+  $("summaryReceiveUnit").textContent = receiveUnit;
+  $("summarySub").textContent = minLine;
+  $("summarySub").className = "trade-summary-sub muted";
 
-  $("quoteStats").innerHTML = stats.join("");
-  $("quoteStats").classList.remove("hidden");
+  $("summaryStats").innerHTML = stats.join("");
+  $("summaryStats").classList.remove("hidden");
 
   const alerts = [];
   if (q.inputLimit) {
@@ -874,29 +1133,45 @@ function renderQuote(q) {
     const cls = q.inputLimit.exceedsBalance ? "warn" : "info";
     let text = `Max ${q.inputLimit.asset}: ${q.inputLimit.maxInputUi}`;
     if (q.inputLimit.hint) text += ` — ${q.inputLimit.hint}`;
-    alerts.push(`<div class="quote-alert ${cls}">${text}</div>`);
+    alerts.push(`<div class="trade-alert ${cls}">${text}</div>`);
   } else {
     lastQuoteExceedsBalance = false;
   }
-  updateBuildBtn();
+  updateSignSendBtn();
 
   if (q.sponsor) {
     const sponsorSol = formatQuoteAsset(q.sponsor.estimatedLamports, "SOL");
     alerts.push(
-      `<div class="quote-alert info">Sponsor repay (est.): ~${sponsorSol} SOL</div>`
+      `<div class="trade-alert info">Sponsor repay (est.): ~${sponsorSol} SOL</div>`
     );
   }
 
-  $("quoteAlerts").innerHTML = alerts.join("");
+  if (q.build?.transactionSizeBytes != null) {
+    const closeNote =
+      q.build.smartCloseApplied != null
+        ? q.build.smartCloseApplied
+          ? " · smart close"
+          : " · no smart close"
+        : "";
+    alerts.push(
+      `<div class="trade-alert info">Tx ${q.build.transactionSizeBytes} B${closeNote} · ready to sign</div>`
+    );
+  } else if (q.buildSkippedReason === "no_wallet") {
+    alerts.push(
+      `<div class="trade-alert info">Connect wallet to assemble transaction</div>`
+    );
+  }
 
-  $("quoteTechBody").innerHTML = [
+  $("summaryAlerts").innerHTML = alerts.join("");
+
+  $("summaryTechBody").innerHTML = [
     `Route: ${q.route.join(" → ")}`,
-    `inputRaw: ${q.inputRaw} (${q.inputLabel}, frozen for build)`,
+    `inputRaw: ${q.inputRaw} (${q.inputLabel})`,
     `minOutputRaw: ${q.minOutputRaw}`,
     `serviceFeeRaw: ${q.serviceFeeRaw} (${q.serviceFeeLabel})`,
     `netQuoteRaw: ${q.netQuoteRaw}`,
   ].join("<br>");
-  $("quoteTech").classList.remove("hidden");
+  $("summaryTech").classList.remove("hidden");
 }
 
 async function doQuote() {
@@ -908,12 +1183,12 @@ async function doQuote() {
   quoteAbort = new AbortController();
 
   const body = tradeBodyBase();
+  body.priorityTier = $("priorityTier").value;
   if (walletPubkey) body.userPubkey = walletPubkey;
 
   renderQuoteLoading();
   lastQuoteSnapshot = null;
   lastQuoteExceedsBalance = false;
-  updateBuildBtn();
 
   try {
     const res = await fetch("/api/quote", {
@@ -924,18 +1199,21 @@ async function doQuote() {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error ?? res.statusText);
-    lastQuoteSnapshot = snapshotFromQuote(data);
-    renderQuote(data);
-    syncWalletFromQuote(data);
-    updateBuildBtn();
+    applyPrepareResponse(data);
   } catch (e) {
     if (e.name === "AbortError") return;
     logClientError("quote", e, body);
     renderQuoteError(e.message);
+    lastBuilt = null;
+    stopBlockhashCountdown();
+    updateSignSendBtn();
   }
 }
 
 function scheduleQuote() {
+  const mintA = $("mintA").value.trim();
+  const inputAmount = $("inputAmount").value.trim();
+  if (!mintA || !inputAmount) return;
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(doQuote, publicConfig.debounceMs ?? 300);
 }
@@ -965,19 +1243,21 @@ async function init() {
     walletPubkey = pk?.toString?.() ?? provider.publicKey?.toString?.();
     updateWalletUi();
     startBalanceRefreshTimer();
+    await refreshQuoteWalletBalances();
     if ($("mintA").value.trim()) await doResolve();
     else scheduleQuote();
   });
   provider?.on?.("disconnect", () => {
     walletProvider = null;
     walletPubkey = null;
+    quoteWallet = null;
     updateWalletUi();
     stopBalanceRefreshTimer();
     updateBalancePctButtons();
   });
 
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden && walletPubkey && $("mintA").value.trim()) {
+    if (!document.hidden && walletPubkey) {
       void refreshWalletState("visible");
     }
   });
@@ -1002,12 +1282,13 @@ async function init() {
   });
   $("inputAmount").addEventListener("input", scheduleQuote);
   $("slippage").addEventListener("input", scheduleQuote);
+  $("priorityTier").addEventListener("change", scheduleQuote);
   document.querySelectorAll(".pct-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       applyBalancePercent(Number(btn.dataset.pct));
     });
   });
-  $("quoteBtn").addEventListener("click", doQuote);
+  $("refreshQuoteBtn").addEventListener("click", doQuote);
   $("connectBtn").addEventListener("click", () => {
     connectWallet().catch((e) => {
       $("walletStatus").textContent = e.message;
@@ -1015,7 +1296,13 @@ async function init() {
     });
   });
   $("disconnectBtn").addEventListener("click", () => disconnectWallet());
-  $("buildSignBtn").addEventListener("click", doBuildSign);
+  $("signSendBtn").addEventListener("click", () => {
+    if ($("signSendBtn").textContent === "Quote & Build") {
+      doQuote().catch((e) => logClientError("quote-build", e));
+    } else {
+      doSignSend().catch((e) => logClientError("sign-send", e));
+    }
+  });
 
   renderQuoteIdle();
   updateModeUi();
@@ -1023,6 +1310,7 @@ async function init() {
   updateBalancePctButtons();
   if (walletPubkey) {
     startBalanceRefreshTimer();
+    void refreshQuoteWalletBalances();
     if ($("mintA").value.trim()) void doResolve();
   }
 }

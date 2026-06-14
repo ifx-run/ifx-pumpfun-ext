@@ -1,6 +1,6 @@
 import { PublicKey } from "@solana/web3.js";
 
-import type { AppConfig } from "../config/types.js";
+import type { AppConfig, PriorityTier } from "../config/types.js";
 import type {
   QuoteLabel,
   QuoteRequest,
@@ -191,7 +191,8 @@ export async function quoteTrade(
 
   const quoteLabel = response.serviceFeeLabel;
   const side = req.side ?? "buy";
-  const priorityTier = config.priorityFee.defaultTier;
+  const priorityTier = (req.priorityTier ??
+    config.priorityFee.defaultTier) as PriorityTier;
 
   let result: QuoteResponse = response;
 

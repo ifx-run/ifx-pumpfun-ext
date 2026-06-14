@@ -52,7 +52,19 @@ import {
 } from "../util/transaction-size.js";
 import { logError } from "../util/log-error.js";
 import { getAddressLookupTables } from "../solana/alt.js";
-import type { BuildTxRequest, BuildTxResponse, QuoteResponse, QuoteSnapshot } from "../types/api.js";
+import {
+  blockhashContextToExpiry,
+  fetchBlockhashContext,
+  type BlockhashContext,
+} from "../solana/blockhash.js";
+import type {
+  BuildTxRequest,
+  BuildTxResponse,
+  QuoteRequest,
+  QuoteResponse,
+  QuoteSnapshot,
+} from "../types/api.js";
+import { errorMessage } from "../util/log-error.js";
 
 async function runBuildPhase<T>(
   phase: string,
@@ -77,7 +89,20 @@ function priorityIxs(config: AppConfig, tier: PriorityTier): TransactionInstruct
 
 export type BuildTradeParams = BuildTxRequest & {
   priorityTier: PriorityTier;
+  blockhashCtx?: BlockhashContext;
 };
+
+function quoteSnapshotFromResponse(q: QuoteResponse): QuoteSnapshot {
+  return {
+    inputRaw: q.inputRaw,
+    inputLabel: q.inputLabel,
+    minOutputRaw: q.minOutputRaw,
+    serviceFeeRaw: q.serviceFeeRaw,
+    serviceFeeLabel: q.serviceFeeLabel,
+    netQuoteRaw: q.netQuoteRaw,
+    ixKind: q.ixKind,
+  };
+}
 
 function quoteFromSnapshot(snapshot: QuoteSnapshot): QuoteResponse {
   return {
@@ -120,10 +145,12 @@ async function finalizeTx(
   tx: Transaction,
   framePubkey: string,
   sponsor: SponsorPlan,
-  smartCloseIxs: TransactionInstruction[] = []
+  smartCloseIxs: TransactionInstruction[] = [],
+  blockhashCtx?: BlockhashContext
 ): Promise<BuildTxResponse> {
-  const { blockhash, lastValidBlockHeight } =
-    await pump.connection.getLatestBlockhash("confirmed");
+  const ctx =
+    blockhashCtx ?? (await fetchBlockhashContext(pump.connection));
+  const { blockhash, lastValidBlockHeight } = ctx;
 
   const feePayer = sponsor.active ? sponsor.pubkey : user;
 
@@ -288,7 +315,8 @@ async function buildSwapTransaction(
     tx,
     framePubkey,
     sponsor,
-    smartCloseIxs
+    smartCloseIxs,
+    req.blockhashCtx
   );
 }
 
@@ -425,11 +453,21 @@ async function buildSingleHopTransaction(
       tx,
       framePubkey,
       sponsor,
-      smartCloseIxs
+      smartCloseIxs,
+      req.blockhashCtx
     );
   }
 
-  return finalizeTx(pump, config, user, tx, framePubkey, sponsor);
+  return finalizeTx(
+    pump,
+    config,
+    user,
+    tx,
+    framePubkey,
+    sponsor,
+    [],
+    req.blockhashCtx
+  );
 }
 
 export async function buildTradeTransaction(
@@ -519,4 +557,60 @@ export async function buildTradeTransaction(
     () => buildSingleHopTransaction(pump, config, req, quote, sponsor),
     { ...buildCtx, side }
   );
+}
+
+export type PrepareTradeParams = QuoteRequest & {
+  priorityTier?: PriorityTier;
+};
+
+/** Quote + unsigned tx build in one round trip; blockhash fetched alongside quote. */
+export async function prepareTrade(
+  pump: PumpContext,
+  config: AppConfig,
+  req: PrepareTradeParams
+): Promise<QuoteResponse> {
+  const slippageBps = req.slippageBps ?? config.quote.defaultSlippageBps;
+  const quoteReq: QuoteRequest = { ...req, slippageBps };
+
+  const [blockhashCtx, quote] = await Promise.all([
+    fetchBlockhashContext(pump.connection),
+    quoteTrade(pump, config, quoteReq),
+  ]);
+
+  const blockhash = blockhashContextToExpiry(blockhashCtx);
+  const base: QuoteResponse = { ...quote, blockhash };
+
+  if (!req.userPubkey) {
+    return { ...base, build: null, buildSkippedReason: "no_wallet" };
+  }
+
+  if (quote.inputLimit?.exceedsBalance) {
+    return { ...base, build: null, buildSkippedReason: "exceeds_balance" };
+  }
+
+  const priorityTier = (req.priorityTier ??
+    config.priorityFee.defaultTier) as PriorityTier;
+
+  try {
+    const build = await buildTradeTransaction(pump, config, {
+      mode: req.mode,
+      side: req.side,
+      mintA: req.mintA,
+      mintB: req.mintB,
+      inputAmount: req.inputAmount,
+      slippageBps,
+      userPubkey: req.userPubkey,
+      priorityTier,
+      quoteSnapshot: quoteSnapshotFromResponse(quote),
+      blockhashCtx,
+    });
+    return { ...base, build, buildSkippedReason: null };
+  } catch (err) {
+    return {
+      ...base,
+      build: null,
+      buildSkippedReason: "build_error",
+      buildError: errorMessage(err),
+    };
+  }
 }

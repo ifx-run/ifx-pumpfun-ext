@@ -7,11 +7,16 @@ import { z } from "zod";
 
 import { loadConfig, isPriorityTier } from "./config/load.js";
 import { createConnection } from "./solana/connection.js";
-import { buildTradeTransaction } from "./ifx/build.js";
+import { buildTradeTransaction, prepareTrade } from "./ifx/build.js";
 import { PumpContext } from "./pump/context.js";
 import { resolveTokens } from "./pump/resolve.js";
-import { quoteTrade } from "./pump/quote.js";
+import { fetchWalletBalances } from "./wallet/balances.js";
 import { errorMessage, logRouteError } from "./util/log-error.js";
+import { PublicKey } from "@solana/web3.js";
+
+const walletBalancesBody = z.object({
+  userPubkey: z.string().min(32),
+});
 
 const resolveBody = z.object({
   mintA: z.string().min(32),
@@ -27,6 +32,7 @@ const quoteBody = z.object({
   inputAmount: z.string().min(1),
   slippageBps: z.number().int().min(0).max(5000).optional(),
   userPubkey: z.string().optional(),
+  priorityTier: z.enum(["low", "medium", "high"]).optional(),
 });
 
 const quoteSnapshotBody = z
@@ -76,6 +82,23 @@ export async function buildApp() {
     addressLookupTableCount: config.solana.addressLookupTables.length,
   }));
 
+  app.post("/api/wallet/balances", async (req, reply) => {
+    const parsed = walletBalancesBody.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.flatten() });
+    }
+    try {
+      return await fetchWalletBalances(
+        pump.connection,
+        config,
+        new PublicKey(parsed.data.userPubkey)
+      );
+    } catch (e) {
+      logRouteError(req.log, "POST /api/wallet/balances", e, parsed.data);
+      return reply.code(400).send({ error: errorMessage(e) });
+    }
+  });
+
   app.post("/api/token/resolve", async (req, reply) => {
     const parsed = resolveBody.safeParse(req.body);
     if (!parsed.success) {
@@ -106,11 +129,16 @@ export async function buildApp() {
     if (parsed.data.mode === "trade" && !parsed.data.side) {
       return reply.code(400).send({ error: "side required when mode=trade" });
     }
+    const tier = parsed.data.priorityTier ?? config.priorityFee.defaultTier;
+    if (parsed.data.priorityTier && !isPriorityTier(tier)) {
+      return reply.code(400).send({ error: "invalid priorityTier" });
+    }
     try {
-      return await quoteTrade(pump, config, {
+      return await prepareTrade(pump, config, {
         ...parsed.data,
         slippageBps:
           parsed.data.slippageBps ?? config.quote.defaultSlippageBps,
+        priorityTier: tier,
       });
     } catch (e) {
       logRouteError(req.log, "POST /api/quote", e, parsed.data);

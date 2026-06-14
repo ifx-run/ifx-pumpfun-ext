@@ -40,7 +40,21 @@ export type QuoteRequest = {
   inputAmount: string;
   slippageBps: number;
   userPubkey?: string;
+  priorityTier?: string;
 };
+
+/** Estimated blockhash validity for UI countdown (slot time is approximate). */
+export type BlockhashExpiry = {
+  lastValidBlockHeight: number;
+  currentBlockHeight: number;
+  remainingSlots: number;
+  expiresAtMs: number;
+};
+
+export type BuildSkippedReason =
+  | "no_wallet"
+  | "exceeds_balance"
+  | "build_error";
 
 export type QuoteResponse = {
   inputRaw: string;
@@ -75,6 +89,12 @@ export type QuoteResponse = {
     exceedsBalance: boolean;
     hint: string | null;
   };
+  /** Present when quote runs with blockhash fetch (prepare flow). */
+  blockhash?: BlockhashExpiry;
+  /** Unsigned v0 transaction — built in the same request as quote when wallet connected. */
+  build?: BuildTxResponse | null;
+  buildSkippedReason?: BuildSkippedReason | null;
+  buildError?: string;
 };
 
 export type PublicConfigResponse = {
