@@ -22,7 +22,7 @@ A self-hosted showcase: Fastify API + static browser UI. Paste a mint, get an ex
 | **Same-quote two-hop swap** | Token A → quote → Token B; hop-2 `spendable_quote_in` patched from hop-1 proceeds via Ifx `rawCpiPatch`. |
 | **Conditional ATA close** | After sell paths, close the input ATA only when balance hits zero — otherwise Skip (no whole-tx revert). |
 | **Quote-only service fee** | Configurable bps fee in SOL or USDC, taken at the correct hop boundary — never in meme tokens. |
-| **SOL sponsor + repay** | Optional gas/rent advance for SOL-quote buys; patched repayment on sells (including swap sell leg). |
+| **SOL sponsor + repay** | Optional gas/rent for SOL-quote **sells** (user toggle; repay from proceeds). Not available for buys or two-hop swaps. |
 | **v0 + ALT** | Every build compiles a versioned transaction with configured Address Lookup Tables; smart-close instructions are dropped when size would exceed the limit. |
 | **Transaction inspector** | Per-instruction account list with ALT vs static resolution, hex data, and post-send on-chain Success / Failed status. |
 
@@ -57,6 +57,17 @@ After **Sign & Send**, the right panel stays frozen until the user cancels in-wa
 | Patch Pump `sell_v2` / `buy_exact_quote_in_v2` fields | `rawCpi` + documented `data_offset` | [raw-cpi-patches](https://github.com/ifx-run/ifx/blob/main/docs/raw-cpi-patches.md) |
 
 Off-chain templates and curve math: [`@pump-fun/pump-sdk`](https://www.npmjs.com/package/@pump-fun/pump-sdk). On-chain orchestration: [`@ifx-run/sdk`](https://www.npmjs.com/package/@ifx-run/sdk) ([source](https://github.com/ifx-run/ifx/tree/main/sdk)).
+
+---
+
+## Example transactions (mainnet)
+
+Transactions assembled by this stack on Solana mainnet:
+
+| Flow | Solscan |
+|------|---------|
+| **Two-hop swap** — sell token A, Ifx `let` + patched `buy_exact_quote_in_v2` for token B in one tx | [2Q41RL3bW5BaNMW19RqGRNnoz3t4vuApVKVxPSN38rjLAG3dVaQDAtsjvLHPsLuapFjxxT2dzFovpFePHhesdegT](https://solscan.io/tx/2Q41RL3bW5BaNMW19RqGRNnoz3t4vuApVKVxPSN38rjLAG3dVaQDAtsjvLHPsLuapFjxxT2dzFovpFePHhesdegT) |
+| **Sponsored sell** — sponsor co-signs as fee payer; patched SOL repay from sell proceeds | [4VEQXHs176NLA5pbjL16hT7Ly4WWWC83P1VQGYXT416tJAS5APirSQbDaeXftSqKnotoCfkWtZBYYoYu64QgNAe9](https://solscan.io/tx/4VEQXHs176NLA5pbjL16hT7Ly4WWWC83P1VQGYXT416tJAS5APirSQbDaeXftSqKnotoCfkWtZBYYoYu64QgNAe9) |
 
 ---
 

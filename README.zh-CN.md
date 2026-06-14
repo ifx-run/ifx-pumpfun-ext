@@ -22,7 +22,7 @@
 | **同 quote 两跳互换** | Token A → quote → Token B；第二跳 `spendable_quote_in` 由 Ifx `rawCpiPatch` 从第一跳 proceeds 注入。 |
 | **条件关 ATA** | 卖出路径结束后，仅当输入 token ATA 余额为 0 时 `closeAccount`，否则 Skip，避免整笔交易 revert。 |
 | **Quote 平台手续费** | 可配置 bps，仅在 SOL / USDC 上收取，在正确的 hop 边界扣款——从不扣 meme token。 |
-| **SOL 代付 + 偿还** | SOL quote 买入时可代付 gas/rent；卖出（含 swap 卖腿）通过 patched transfer 偿还 sponsor。 |
+| **SOL 代付 + 偿还** | SOL quote **卖出**可选代付 gas/rent（用户开关，从成交 proceeds 偿还）。**买入与两跳 swap 不支持。** |
 | **v0 + ALT** | 每次 build 编译版本化交易并加载配置的 Address Lookup Table；体积超限时自动跳过 smart-close 指令。 |
 | **Transaction inspector** | 逐指令账户表（ALT / static 解析）、hex 数据、发送后链上 **Success / Failed** 状态。 |
 
@@ -57,6 +57,17 @@
 | Patch Pump `sell_v2` / `buy_exact_quote_in_v2` | `rawCpi` + `data_offset` | [raw-cpi-patches](https://github.com/ifx-run/ifx/blob/main/docs/raw-cpi-patches.zh-CN.md) |
 
 链下模板与曲线数学：[`@pump-fun/pump-sdk`](https://www.npmjs.com/package/@pump-fun/pump-sdk)。链上编排：[`@ifx-run/sdk`](https://www.npmjs.com/package/@ifx-run/sdk)（[源码](https://github.com/ifx-run/ifx/tree/main/sdk)）。
+
+---
+
+## 主网示例交易
+
+本仓库组装的 mainnet 交易：
+
+| 场景 | Solscan |
+|------|---------|
+| **两跳 swap** — 同一笔 tx 内卖 A，Ifx `let` + patched `buy_exact_quote_in_v2` 买 B | [2Q41RL3bW5BaNMW19RqGRNnoz3t4vuApVKVxPSN38rjLAG3dVaQDAtsjvLHPsLuapFjxxT2dzFovpFePHhesdegT](https://solscan.io/tx/2Q41RL3bW5BaNMW19RqGRNnoz3t4vuApVKVxPSN38rjLAG3dVaQDAtsjvLHPsLuapFjxxT2dzFovpFePHhesdegT) |
+| **Sponsored sell** — sponsor 代付 gas；卖出 proceeds 经 patched transfer 偿还 | [4VEQXHs176NLA5pbjL16hT7Ly4WWWC83P1VQGYXT416tJAS5APirSQbDaeXftSqKnotoCfkWtZBYYoYu64QgNAe9](https://solscan.io/tx/4VEQXHs176NLA5pbjL16hT7Ly4WWWC83P1VQGYXT416tJAS5APirSQbDaeXftSqKnotoCfkWtZBYYoYu64QgNAe9) |
 
 ---
 
