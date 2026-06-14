@@ -147,6 +147,18 @@ body {
   margin-top: 0.1rem;
 }
 
+.banner-grid code.ok {
+  color: #86efac;
+}
+
+.banner-grid code.error {
+  color: #f87171;
+}
+
+.banner-grid code.muted {
+  color: #9aa0a6;
+}
+
 .banner-link {
   display: inline-block;
   margin-top: 0.35rem;

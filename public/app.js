@@ -28,6 +28,8 @@ let balanceRefreshTimer;
 let blockhashTimer = null;
 let resolveInFlight = false;
 let resolvePending = false;
+/** When true, trade preview + inspector are frozen (Sign & Send in flight). */
+let rightPanelLocked = false;
 
 function logClientError(phase, err, context) {
   console.error(`[ifx-pumpfun] ${phase}`, err);
@@ -89,7 +91,21 @@ function clearTradeSummaryExchange() {
   $("summaryReceiveUnit").textContent = "";
 }
 
+function lockRightPanel() {
+  rightPanelLocked = true;
+  cancelPendingQuote();
+  stopBlockhashCountdown();
+  $("signSendBtn").disabled = true;
+  $("blockhashCountdown").classList.add("hidden");
+}
+
+function unlockRightPanel() {
+  rightPanelLocked = false;
+  updateSignSendBtn();
+}
+
 function renderQuoteIdle(message = "Enter amount on the left to preview.") {
+  if (rightPanelLocked) return;
   setTradeSummaryState("idle");
   clearTradeSummaryExchange();
   $("summarySub").textContent = message;
@@ -102,6 +118,7 @@ function renderQuoteIdle(message = "Enter amount on the left to preview.") {
 }
 
 function renderQuoteLoading() {
+  if (rightPanelLocked) return;
   setTradeSummaryState("loading");
   $("summaryPayAmount").textContent = "…";
   $("summaryPayUnit").textContent = "";
@@ -122,6 +139,7 @@ function renderQuoteLoading() {
 }
 
 function renderQuoteError(message) {
+  if (rightPanelLocked) return;
   setTradeSummaryState("error");
   clearTradeSummaryExchange();
   $("summarySub").textContent = message;
@@ -175,7 +193,7 @@ function applyBalancePercent(percent) {
   if (amountRaw <= 0n) return;
 
   $("inputAmount").value = formatRawToUi(amountRaw, bal.decimals);
-  scheduleQuote();
+  onTradeInputChanged();
 }
 
 function shortPubkey(pk) {
@@ -329,6 +347,7 @@ function startBlockhashCountdown(blockhash) {
 }
 
 function updateSignSendBtn() {
+  if (rightPanelLocked) return;
   const btn = $("signSendBtn");
   const countdown = $("blockhashCountdown");
 
@@ -370,15 +389,26 @@ function updateSignSendBtn() {
   countdown.textContent = `Re-quote in ${secs}s`;
 }
 
-function applyPrepareResponse(data) {
+function applyPrepareResponse(data, opts = {}) {
+  const { silent = false } = opts;
+  if (rightPanelLocked && !silent) return;
+
+  const touchUi = !silent && !rightPanelLocked;
+
   lastQuoteSnapshot = snapshotFromQuote(data);
   lastBuilt = data.build ?? null;
 
   if (data.blockhash) {
-    startBlockhashCountdown(data.blockhash);
-  } else {
+    if (touchUi) {
+      startBlockhashCountdown(data.blockhash);
+    } else {
+      expiresAtMs = data.blockhash.expiresAtMs ?? 0;
+    }
+  } else if (touchUi) {
     stopBlockhashCountdown();
   }
+
+  if (!touchUi) return;
 
   renderQuote(data);
   syncWalletFromQuote(data);
@@ -485,14 +515,13 @@ function cancelPendingQuote() {
   }
 }
 
-/** After a confirmed send — keep inspector result, stop auto re-quote. */
+/** After a confirmed send — keep right panel as-is, stop auto re-quote. */
 function resetAfterSuccessfulSend() {
   cancelPendingQuote();
   $("inputAmount").value = "";
   lastQuoteSnapshot = null;
   lastBuilt = null;
   lastQuoteExceedsBalance = false;
-  renderQuoteIdle("Enter a new amount to quote again.");
   updateBalancePctButtons();
 }
 
@@ -614,31 +643,55 @@ function isBlockhashSendError(err) {
   );
 }
 
+function formatTxErr(err) {
+  if (err == null) return null;
+  if (typeof err === "string") return err;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+
+async function fetchTxExecutionResult(connection, signature) {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const { value } = await connection.getSignatureStatuses([signature], {
+      searchTransactionHistory: true,
+    });
+    const status = value[0];
+    if (status) {
+      const err = status.err;
+      return {
+        landed: true,
+        succeeded: err == null,
+        err: formatTxErr(err),
+      };
+    }
+    if (attempt < 7) {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+  }
+  return { landed: false, succeeded: null, err: null };
+}
+
 async function signAndSend(connection, built) {
   const tx = decodeTxBase64(built.transaction);
 
+  let signature;
   if (walletProvider.signAndSendTransaction) {
     const result = await walletProvider.signAndSendTransaction(tx, {
       skipPreflight: false,
     });
-    const signature =
+    signature =
       typeof result === "string" ? result : result.signature?.toString?.() ?? String(result);
-    await connection.confirmTransaction(
-      {
-        signature,
-        blockhash: built.recentBlockhash,
-        lastValidBlockHeight: built.lastValidBlockHeight,
-      },
-      "confirmed"
-    );
-    return signature;
+  } else {
+    const signed = await walletProvider.signTransaction(tx);
+    signature = await connection.sendRawTransaction(signed.serialize(), {
+      skipPreflight: false,
+      preflightCommitment: "confirmed",
+    });
   }
 
-  const signed = await walletProvider.signTransaction(tx);
-  const signature = await connection.sendRawTransaction(signed.serialize(), {
-    skipPreflight: false,
-    preflightCommitment: "confirmed",
-  });
   await connection.confirmTransaction(
     {
       signature,
@@ -647,7 +700,9 @@ async function signAndSend(connection, built) {
     },
     "confirmed"
   );
-  return signature;
+
+  const execution = await fetchTxExecutionResult(connection, signature);
+  return { signature, execution };
 }
 
 function solscanTxUrl(signature) {
@@ -661,6 +716,12 @@ function solscanTxUrl(signature) {
   return `https://solscan.io/tx/${signature}`;
 }
 
+function executionResultLabel(execution) {
+  if (!execution?.landed) return { text: "Unknown", tone: "muted" };
+  if (execution.succeeded) return { text: "Success", tone: "ok" };
+  return { text: "Failed", tone: "error" };
+}
+
 function renderInspectorBanner(opts) {
   const banner = $("inspectorBanner");
   if (!opts) {
@@ -669,7 +730,7 @@ function renderInspectorBanner(opts) {
     return;
   }
 
-  const { kind, title, message, built, signature } = opts;
+  const { kind, title, message, built, signature, execution } = opts;
   const kindClass =
     kind === "success"
       ? "banner-success"
@@ -682,11 +743,17 @@ function renderInspectorBanner(opts) {
   banner.className = `inspector-banner ${kindClass}`;
 
   let body = "";
-  if (kind === "success" && signature) {
+  if (signature && (kind === "success" || kind === "error")) {
     const url = solscanTxUrl(signature);
+    const result = executionResultLabel(execution);
+    const errLine =
+      execution?.succeeded === false && execution.err
+        ? `<code class="error">${execution.err}</code>`
+        : "";
     body = `
       <a class="banner-link" href="${url}" target="_blank" rel="noopener">View on Solscan →</a>
       <div class="banner-grid">
+        <div>Result<code class="${result.tone}">${result.text}</code>${errLine}</div>
         <div>Signature<code>${signature}</code></div>
         <div>Frame<code>${built?.frameUsed ?? "—"}</code></div>
         <div>Fee payer<code>${built?.feePayer ?? walletPubkey ?? "—"}</code></div>
@@ -859,11 +926,13 @@ async function doSignSend() {
     if (!lastBuilt || isBlockhashExpired()) return;
   }
 
+  lockRightPanel();
+
   const connection = new Connection(publicConfig.rpcUrl, "confirmed");
 
   for (let attempt = 1; attempt <= BLOCKHASH_RETRIES; attempt++) {
     if (attempt > 1) {
-      await doQuote();
+      await doQuote({ silent: true });
       if (!lastBuilt) return;
     }
 
@@ -882,29 +951,37 @@ async function doSignSend() {
       renderInspectorBanner({
         kind: "error",
         title: "Blockhash expired",
-        message: "Click Quote & Build to refresh.",
+        message: "Enter a new amount to quote again.",
       });
-      stopBlockhashCountdown();
-      updateSignSendBtn();
       return;
     }
 
     try {
-      const signature = await signAndSend(connection, lastBuilt);
+      const { signature, execution } = await signAndSend(connection, lastBuilt);
       stopBlockhashCountdown();
+      const failedOnChain = execution.succeeded === false;
+      const succeeded = execution.succeeded === true;
       renderInspectorBanner({
-        kind: "success",
-        title: "Transaction confirmed",
+        kind: failedOnChain ? "error" : "success",
+        title: failedOnChain
+          ? "Transaction failed on-chain"
+          : succeeded
+            ? "Transaction succeeded"
+            : "Transaction confirmed",
         built: lastBuilt,
         signature,
+        execution,
       });
       renderTxInspector(
         lastBuilt.inspection,
-        "Confirmed — inspect instructions below"
+        failedOnChain
+          ? "Failed on-chain — inspect instructions below"
+          : succeeded
+            ? "Succeeded — inspect instructions below"
+            : "Confirmed — inspect instructions below"
       );
       resetAfterSuccessfulSend();
       await refreshWalletState("tx-confirmed", { skipQuote: true });
-      updateSignSendBtn();
       return;
     } catch (e) {
       if (isBlockhashSendError(e) && attempt < BLOCKHASH_RETRIES) continue;
@@ -918,6 +995,7 @@ async function doSignSend() {
           lastBuilt.inspection,
           "Cancelled — inspect unsigned tx below"
         );
+        unlockRightPanel();
         return;
       }
       logClientError("sign-send", e, {
@@ -1174,10 +1252,13 @@ function renderQuote(q) {
   $("summaryTech").classList.remove("hidden");
 }
 
-async function doQuote() {
+async function doQuote(opts = {}) {
+  const { silent = false } = opts;
   const mintA = $("mintA").value.trim();
   const inputAmount = $("inputAmount").value.trim();
   if (!mintA || !inputAmount) return;
+
+  if (!silent && rightPanelLocked) return;
 
   if (quoteAbort) quoteAbort.abort();
   quoteAbort = new AbortController();
@@ -1186,9 +1267,11 @@ async function doQuote() {
   body.priorityTier = $("priorityTier").value;
   if (walletPubkey) body.userPubkey = walletPubkey;
 
-  renderQuoteLoading();
-  lastQuoteSnapshot = null;
-  lastQuoteExceedsBalance = false;
+  if (!silent) {
+    renderQuoteLoading();
+    lastQuoteSnapshot = null;
+    lastQuoteExceedsBalance = false;
+  }
 
   try {
     const res = await fetch("/api/quote", {
@@ -1199,10 +1282,14 @@ async function doQuote() {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error ?? res.statusText);
-    applyPrepareResponse(data);
+    applyPrepareResponse(data, { silent });
   } catch (e) {
     if (e.name === "AbortError") return;
     logClientError("quote", e, body);
+    if (silent) {
+      lastBuilt = null;
+      return;
+    }
     renderQuoteError(e.message);
     lastBuilt = null;
     stopBlockhashCountdown();
@@ -1210,7 +1297,16 @@ async function doQuote() {
   }
 }
 
+function onTradeInputChanged() {
+  if (rightPanelLocked) {
+    unlockRightPanel();
+    renderQuoteIdle();
+  }
+  scheduleQuote();
+}
+
 function scheduleQuote() {
+  if (rightPanelLocked) return;
   const mintA = $("mintA").value.trim();
   const inputAmount = $("inputAmount").value.trim();
   if (!mintA || !inputAmount) return;
@@ -1280,7 +1376,7 @@ async function init() {
   $("swapMintsBtn").addEventListener("click", () => {
     swapMintFields().catch((e) => logClientError("swap-mints", e));
   });
-  $("inputAmount").addEventListener("input", scheduleQuote);
+  $("inputAmount").addEventListener("input", onTradeInputChanged);
   $("slippage").addEventListener("input", scheduleQuote);
   $("priorityTier").addEventListener("change", scheduleQuote);
   document.querySelectorAll(".pct-btn").forEach((btn) => {
@@ -1288,7 +1384,10 @@ async function init() {
       applyBalancePercent(Number(btn.dataset.pct));
     });
   });
-  $("refreshQuoteBtn").addEventListener("click", doQuote);
+  $("refreshQuoteBtn").addEventListener("click", () => {
+    if (rightPanelLocked) return;
+    doQuote().catch((e) => logClientError("refresh-quote", e));
+  });
   $("connectBtn").addEventListener("click", () => {
     connectWallet().catch((e) => {
       $("walletStatus").textContent = e.message;
