@@ -88,6 +88,7 @@ export type PublicConfigResponse = {
   priorityTiers: string[];
   defaultPriorityTier: string;
   rpcUrl: string;
+  addressLookupTableCount: number;
 };
 
 /** Frozen quote fields for build — avoids re-parsing decimals on build. */
@@ -110,10 +111,55 @@ export type BuildTxRequest = QuoteRequest & {
 
 export type BuildTxResponse = {
   transaction: string;
+  /** Always 0 — legacy transactions are not returned. */
+  transactionVersion: 0;
   recentBlockhash: string;
   lastValidBlockHeight?: number;
   frameUsed?: string;
   feePayer?: string;
   signers?: string[];
   partiallySignedBy?: string[];
+  /** ALT pubkeys compiled into this transaction. */
+  addressLookupTables?: string[];
+  /** True when conditional ATA close ixs were included and fit under the size limit. */
+  smartCloseApplied?: boolean;
+  transactionSizeBytes?: number;
+  /** Developer-facing decoded instruction breakdown. */
+  inspection?: TxInspection;
+};
+
+export type TxInstructionInspection = {
+  index: number;
+  programId: string;
+  programLabel: string;
+  hint?: string;
+  accounts: {
+    index: number;
+    pubkey: string;
+    isSigner: boolean;
+    isWritable: boolean;
+    /** True when this account index comes from an address lookup table. */
+    altLoaded: boolean;
+    resolution: "static" | "alt-writable" | "alt-readonly";
+    /** In ALT table but still static in message (signers / compiler placement). */
+    inAltTableUnused?: boolean;
+  }[];
+  dataHex: string;
+  dataBase64: string;
+  dataLength: number;
+};
+
+export type TxInspection = {
+  version: 0;
+  numInstructions: number;
+  staticAccountKeys: number;
+  loadedWritableAccounts: number;
+  loadedReadonlyAccounts: number;
+  totalAccountKeys: number;
+  addressLookupTables: string[];
+  frameUsed?: string;
+  feePayer?: string;
+  smartCloseApplied?: boolean;
+  transactionSizeBytes?: number;
+  instructions: TxInstructionInspection[];
 };

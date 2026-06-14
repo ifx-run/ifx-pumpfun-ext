@@ -7,6 +7,10 @@ port = 8787
 [solana]
 rpc_url = "https://api.mainnet-beta.solana.com"
 commitment = "confirmed"
+# On-chain address lookup tables — every build compiles a v0 tx with these ALTs.
+address_lookup_tables = [
+  # "YourAltPubkey...",
+]
 
 [ifx]
 program_id = "ifxmwWVVZDmXN2DUVf7wtJYCXTRY4QsL5rzmNkXzxbj"

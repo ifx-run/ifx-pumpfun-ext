@@ -5,7 +5,8 @@
   },
   "solana": {
     "rpcUrl": "https://api.mainnet-beta.solana.com",
-    "commitment": "confirmed"
+    "commitment": "confirmed",
+    "addressLookupTables": []
   },
   "ifx": {
     "programId": "ifxmwWVVZDmXN2DUVf7wtJYCXTRY4QsL5rzmNkXzxbj",

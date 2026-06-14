@@ -1,6 +1,5 @@
 import {
   createTransferInstruction,
-  NATIVE_MINT,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 import { PublicKey, SystemProgram, TransactionInstruction } from "@solana/web3.js";
@@ -42,30 +41,6 @@ export function serviceFeeTransferIx(
     destAta,
     user,
     feeRaw,
-    [],
-    quoteTokenProgram
-  );
-}
-
-export function isWrappedSol(mint: PublicKey): boolean {
-  return mint.equals(NATIVE_MINT);
-}
-
-/** After SOL-quote sell, fee is taken as WSOL SPL (operator WSOL ATA must exist). */
-export function serviceFeeTransferIxAfterSolSell(
-  params: Omit<ServiceFeeIxParams, "quoteLabel"> & { userWsolAta: PublicKey }
-): TransactionInstruction {
-  const quoteTokenProgram = params.quoteTokenProgram ?? TOKEN_PROGRAM_ID;
-  const destAta = quoteAta(
-    params.recipient,
-    NATIVE_MINT,
-    quoteTokenProgram
-  );
-  return createTransferInstruction(
-    params.userWsolAta,
-    destAta,
-    params.user,
-    params.feeRaw,
     [],
     quoteTokenProgram
   );

@@ -1,6 +1,10 @@
 /** Maximum serialized transaction size accepted by Solana validators (bytes). */
 export const MAX_TRANSACTION_SIZE = 1232;
 
+export function fitsTransactionSize(serialized: Buffer | Uint8Array): boolean {
+  return serialized.length <= MAX_TRANSACTION_SIZE;
+}
+
 export function assertTransactionSize(
   serialized: Buffer | Uint8Array,
   context?: string

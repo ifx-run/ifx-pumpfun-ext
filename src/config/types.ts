@@ -24,7 +24,12 @@ export type SponsorConfig = {
 
 export type AppConfig = {
   server: { host: string; port: number };
-  solana: { rpcUrl: string; commitment: "processed" | "confirmed" | "finalized" };
+  solana: {
+    rpcUrl: string;
+    commitment: "processed" | "confirmed" | "finalized";
+    /** On-chain ALT pubkeys — compiled into every v0 transaction. */
+    addressLookupTables: string[];
+  };
   ifx: { programId: string; publicFrames: string[] };
   pump: { usdcMint: string; nativeMint: string };
   priorityFee: {

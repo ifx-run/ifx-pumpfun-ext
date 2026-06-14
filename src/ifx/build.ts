@@ -3,19 +3,21 @@ import {
   PublicKey,
   Transaction,
   TransactionInstruction,
+  TransactionMessage,
+  VersionedTransaction,
 } from "@solana/web3.js";
 
 import type { AppConfig, PriorityTier } from "../config/types.js";
 import { loadKeypairFromFile } from "../config/keypair.js";
-import { appendConditionalCloseAta } from "../ifx/planner/close-ata.js";
 import {
   appendSwapInstructions,
   sellMinQuoteForSwap,
 } from "../ifx/planner/swap.js";
 import {
-  serviceFeeTransferIx,
-  serviceFeeTransferIxAfterSolSell,
-} from "../ifx/planner/service-fee.js";
+  buildSmartCloseInstructions,
+  type CloseAtaCandidate,
+} from "../ifx/planner/close-ata.js";
+import { serviceFeeTransferIx } from "../ifx/planner/service-fee.js";
 import {
   appendSponsorAtaBootstrap,
   appendSponsorRepay,
@@ -28,11 +30,9 @@ import { resolveTokens } from "../pump/resolve.js";
 import {
   buyExactQuoteInV2Instruction,
   idempotentAtaCreate,
-  isNativeQuoteMint,
   sellV2Instruction,
   userBaseAta,
   userQuoteAta,
-  wrapSolIxs,
 } from "../pump/instructions.js";
 import { resolveBootstrapAtaSpecs } from "../sponsor/bootstrap-specs.js";
 import { buyAtaSpecs } from "../sponsor/ata-specs.js";
@@ -45,8 +45,13 @@ import {
   computeInputLimit,
   fetchWalletBalances,
 } from "../wallet/balances.js";
-import { assertTransactionSize } from "../util/transaction-size.js";
+import { inspectVersionedTransaction } from "../util/tx-inspect.js";
+import {
+  assertTransactionSize,
+  fitsTransactionSize,
+} from "../util/transaction-size.js";
 import { logError } from "../util/log-error.js";
+import { getAddressLookupTables } from "../solana/alt.js";
 import type { BuildTxRequest, BuildTxResponse, QuoteResponse, QuoteSnapshot } from "../types/api.js";
 
 async function runBuildPhase<T>(
@@ -114,38 +119,79 @@ async function finalizeTx(
   user: PublicKey,
   tx: Transaction,
   framePubkey: string,
-  sponsor: SponsorPlan
+  sponsor: SponsorPlan,
+  smartCloseIxs: TransactionInstruction[] = []
 ): Promise<BuildTxResponse> {
   const { blockhash, lastValidBlockHeight } =
     await pump.connection.getLatestBlockhash("confirmed");
-  tx.recentBlockhash = blockhash;
 
   const feePayer = sponsor.active ? sponsor.pubkey : user;
-  tx.feePayer = feePayer;
+
+  const lookupTables = await getAddressLookupTables(
+    pump.connection,
+    config.solana.addressLookupTables,
+    config.rpcCacheTtlMs
+  );
+
+  const compile = (instructions: TransactionInstruction[]) => {
+    const message = new TransactionMessage({
+      payerKey: feePayer,
+      recentBlockhash: blockhash,
+      instructions,
+    }).compileToV0Message(lookupTables);
+    const versionedTx = new VersionedTransaction(message);
+    if (sponsor.active) {
+      if (!config.sponsor.keypairPath) {
+        throw new Error("sponsor.keypairPath required when sponsor is active");
+      }
+      versionedTx.sign([loadKeypairFromFile(config.sponsor.keypairPath)]);
+    }
+    const serialized = versionedTx.serialize();
+    return { versionedTx, serialized };
+  };
+
+  let instructions = tx.instructions;
+  let smartCloseApplied = false;
+
+  if (smartCloseIxs.length > 0) {
+    const withClose = [...instructions, ...smartCloseIxs];
+    const attempt = compile(withClose);
+    if (fitsTransactionSize(attempt.serialized)) {
+      instructions = withClose;
+      smartCloseApplied = true;
+    }
+  }
+
+  const { serialized, versionedTx } = compile(instructions);
+  assertTransactionSize(serialized);
 
   let partiallySignedBy: string[] | undefined;
   if (sponsor.active) {
-    if (!config.sponsor.keypairPath) {
-      throw new Error("sponsor.keypairPath required when sponsor is active");
-    }
-    tx.partialSign(loadKeypairFromFile(config.sponsor.keypairPath));
     partiallySignedBy = [sponsor.pubkey.toBase58()];
   }
 
-  const serialized = tx.serialize({
-    requireAllSignatures: false,
-    verifySignatures: false,
+  const inspection = inspectVersionedTransaction(versionedTx, lookupTables, {
+    ifxProgramId: config.ifx.programId,
+    frameUsed: framePubkey,
+    feePayer: feePayer.toBase58(),
+    smartCloseApplied,
+    transactionSizeBytes: serialized.length,
+    addressLookupTableAddresses: config.solana.addressLookupTables,
   });
-  assertTransactionSize(serialized);
 
   return {
-    transaction: serialized.toString("base64"),
+    transaction: Buffer.from(serialized).toString("base64"),
+    transactionVersion: 0,
     recentBlockhash: blockhash,
     frameUsed: framePubkey,
     lastValidBlockHeight,
     feePayer: feePayer.toBase58(),
     signers: [user.toBase58()],
     partiallySignedBy,
+    addressLookupTables: config.solana.addressLookupTables,
+    smartCloseApplied,
+    transactionSizeBytes: serialized.length,
+    inspection,
   };
 }
 
@@ -207,7 +253,43 @@ async function buildSwapTransaction(
   });
   tx.add(...swapIxs);
 
-  return finalizeTx(pump, config, user, tx, framePubkey, sponsor);
+  const baseAAta = userBaseAta(
+    accountsA.mint,
+    user,
+    accountsA.baseTokenProgram
+  );
+  const closeCandidates: CloseAtaCandidate[] = [
+    {
+      tokenAccount: baseAAta,
+      rentDestination: user,
+      owner: user,
+      tokenProgram: accountsA.baseTokenProgram,
+    },
+  ];
+  if (quote.serviceFeeLabel !== "SOL") {
+    const quoteAtaPk = userQuoteAta(
+      user,
+      accountsA.quoteMint,
+      accountsA.quoteTokenProgram
+    );
+    closeCandidates.push({
+      tokenAccount: quoteAtaPk,
+      rentDestination: user,
+      owner: user,
+      tokenProgram: accountsA.quoteTokenProgram,
+    });
+  }
+  const smartCloseIxs = buildSmartCloseInstructions(scratch, closeCandidates);
+
+  return finalizeTx(
+    pump,
+    config,
+    user,
+    tx,
+    framePubkey,
+    sponsor,
+    smartCloseIxs
+  );
 }
 
 async function buildSingleHopTransaction(
@@ -257,23 +339,10 @@ async function buildSingleHopTransaction(
     }
     tx.add(...ifxIxs);
 
-    if (quote.serviceFeeLabel === "SOL" && feeRaw > 0n) {
+    if (feeRaw > 0n) {
       tx.add(
         serviceFeeTransferIx({
-          quoteLabel: "SOL",
-          feeRaw,
-          user,
-          userQuoteAta: quoteAtaPk,
-          recipient: feeRecipient,
-          quoteMint: accounts.quoteMint,
-          quoteTokenProgram: accounts.quoteTokenProgram,
-        })
-      );
-      tx.add(...wrapSolIxs(user, quoteAtaPk, BigInt(quote.netQuoteRaw)));
-    } else if (feeRaw > 0n) {
-      tx.add(
-        serviceFeeTransferIx({
-          quoteLabel: "USDC",
+          quoteLabel: quote.serviceFeeLabel,
           feeRaw,
           user,
           userQuoteAta: quoteAtaPk,
@@ -298,17 +367,6 @@ async function buildSingleHopTransaction(
         associatedBaseUser: baseAta,
       })
     );
-
-    const buyCloseIxs: TransactionInstruction[] = [];
-    appendConditionalCloseAta(
-      scratch,
-      buyCloseIxs,
-      quoteAtaPk,
-      user,
-      user,
-      accounts.quoteTokenProgram
-    );
-    tx.add(...buyCloseIxs);
   } else {
     tx.add(
       await sellV2Instruction({
@@ -325,54 +383,50 @@ async function buildSingleHopTransaction(
     );
 
     if (feeRaw > 0n) {
-      if (quote.serviceFeeLabel === "SOL" && isNativeQuoteMint(accounts.quoteMint)) {
-        tx.add(
-          serviceFeeTransferIxAfterSolSell({
-            feeRaw,
-            user,
-            userQuoteAta: quoteAtaPk,
-            userWsolAta: quoteAtaPk,
-            recipient: feeRecipient,
-            quoteMint: accounts.quoteMint,
-            quoteTokenProgram: accounts.quoteTokenProgram,
-          })
-        );
-      } else {
-        tx.add(
-          serviceFeeTransferIx({
-            quoteLabel: quote.serviceFeeLabel,
-            feeRaw,
-            user,
-            userQuoteAta: quoteAtaPk,
-            recipient: feeRecipient,
-            quoteMint: accounts.quoteMint,
-            quoteTokenProgram: accounts.quoteTokenProgram,
-          })
-        );
-      }
+      tx.add(
+        serviceFeeTransferIx({
+          quoteLabel: quote.serviceFeeLabel,
+          feeRaw,
+          user,
+          userQuoteAta: quoteAtaPk,
+          recipient: feeRecipient,
+          quoteMint: accounts.quoteMint,
+          quoteTokenProgram: accounts.quoteTokenProgram,
+        })
+      );
     }
 
-    const ifxIxs: TransactionInstruction[] = [];
-    appendConditionalCloseAta(
-      scratch,
-      ifxIxs,
-      baseAta,
-      user,
-      user,
-      accounts.baseTokenProgram
-    );
     if (sponsor.active && quote.serviceFeeLabel === "SOL") {
       assertSponsorRepayCoverage(
         BigInt(quote.minOutputRaw),
         feeRaw,
         sponsor.repayLamports
       );
-      appendSponsorRepay(scratch, ifxIxs, user, sponsor.pubkey, {
+      const sponsorIxs: TransactionInstruction[] = [];
+      appendSponsorRepay(scratch, sponsorIxs, user, sponsor.pubkey, {
         txFeeLamports: sponsor.txFeeLamports,
         repayBufferPercent: config.sponsor.repayBufferPercent,
       });
+      tx.add(...sponsorIxs);
     }
-    tx.add(...ifxIxs);
+
+    const smartCloseIxs = buildSmartCloseInstructions(scratch, [
+      {
+        tokenAccount: baseAta,
+        rentDestination: user,
+        owner: user,
+        tokenProgram: accounts.baseTokenProgram,
+      },
+    ]);
+    return finalizeTx(
+      pump,
+      config,
+      user,
+      tx,
+      framePubkey,
+      sponsor,
+      smartCloseIxs
+    );
   }
 
   return finalizeTx(pump, config, user, tx, framePubkey, sponsor);

@@ -8,15 +8,20 @@ const TOKEN_2022_PROGRAM_ID = new PublicKey(
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 );
 
-/** Close a hop input token account when its balance is zero after the hop. */
+export type CloseAtaCandidate = {
+  tokenAccount: PublicKey;
+  rentDestination: PublicKey;
+  owner: PublicKey;
+  tokenProgram: PublicKey;
+};
+
+/** Close a token account when its balance is zero (Ifx if_else). */
 export function appendConditionalCloseAta(
   scratch: FrameScratch,
   out: TransactionInstruction[],
-  tokenAccount: PublicKey,
-  rentDestination: PublicKey,
-  owner: PublicKey,
-  tokenProgram: PublicKey
+  params: CloseAtaCandidate
 ): void {
+  const { tokenAccount, rentDestination, owner, tokenProgram } = params;
   const letBatch = scratch.letBuilder();
   const tokenRef = asIfxLetAccount(tokenAccount);
   const is2022 = tokenProgram.equals(TOKEN_2022_PROGRAM_ID);
@@ -40,4 +45,16 @@ export function appendConditionalCloseAta(
       close.remaining
     )
   );
+}
+
+/** Build optional smart-close instructions appended after core trade ixs. */
+export function buildSmartCloseInstructions(
+  scratch: FrameScratch,
+  candidates: CloseAtaCandidate[]
+): TransactionInstruction[] {
+  const ixs: TransactionInstruction[] = [];
+  for (const candidate of candidates) {
+    appendConditionalCloseAta(scratch, ixs, candidate);
+  }
+  return ixs;
 }

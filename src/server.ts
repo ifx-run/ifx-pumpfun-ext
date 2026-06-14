@@ -73,6 +73,7 @@ export async function buildApp() {
     priorityTiers: ["low", "medium", "high"],
     defaultPriorityTier: config.priorityFee.defaultTier,
     rpcUrl: config.solana.rpcUrl,
+    addressLookupTableCount: config.solana.addressLookupTables.length,
   }));
 
   app.post("/api/token/resolve", async (req, reply) => {

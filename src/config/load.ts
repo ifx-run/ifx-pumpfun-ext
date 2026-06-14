@@ -68,10 +68,17 @@ function readTomlConfig(path: string): Partial<AppConfig> {
   }
 
   if (solana) {
+    const alts =
+      solana.addressLookupTables ??
+      solana.address_lookup_tables ??
+      solana.alts;
     partial.solana = {
       rpcUrl: str(solana.rpcUrl ?? solana.url ?? solana.rpc_url) ?? "",
       commitment:
         (str(solana.commitment) as AppConfig["solana"]["commitment"]) ?? "confirmed",
+      addressLookupTables: Array.isArray(alts)
+        ? alts.filter((a): a is string => typeof a === "string" && a.length > 0)
+        : [],
     };
   }
 
@@ -182,6 +189,7 @@ export function defaultConfig(): AppConfig {
     solana: {
       rpcUrl: "https://api.mainnet-beta.solana.com",
       commitment: "confirmed",
+      addressLookupTables: [],
     },
     ifx: {
       programId: "ifxmwWVVZDmXN2DUVf7wtJYCXTRY4QsL5rzmNkXzxbj",
@@ -277,6 +285,12 @@ function validateConfig(cfg: AppConfig): void {
       cfg.sponsor.keypairPath,
       true
     );
+  }
+
+  for (const alt of cfg.solana.addressLookupTables) {
+    if (!isValidPubkey(alt)) {
+      throw new Error(`solana.addressLookupTables contains invalid pubkey: ${alt}`);
+    }
   }
 }
 

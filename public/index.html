@@ -14,78 +14,121 @@
     </script>
   </head>
   <body>
-    <main class="wrap">
-      <header>
-        <h1>Pump × Ifx Showcase</h1>
-        <p class="sub">Exact-input quotes · quote-only service fee</p>
-      </header>
+    <div class="app-shell">
+      <div class="panel-left">
+        <header>
+          <h1>Pump × Ifx Showcase</h1>
+          <p class="sub">Exact-input quotes · quote-only service fee</p>
+        </header>
 
-      <section class="card wallet-bar">
-        <div id="walletStatus" class="wallet-status muted">Wallet not connected</div>
-        <div class="wallet-actions">
-          <button id="connectBtn" type="button" class="secondary">Connect wallet</button>
-          <button id="disconnectBtn" type="button" class="secondary hidden">Disconnect</button>
+        <section class="card wallet-bar">
+          <div id="walletStatus" class="wallet-status muted">Wallet not connected</div>
+          <div class="wallet-actions">
+            <button id="connectBtn" type="button" class="secondary">Connect wallet</button>
+            <button id="disconnectBtn" type="button" class="secondary hidden">Disconnect</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <label class="row">
+            <span>Mode</span>
+            <select id="mode">
+              <option value="trade">Trade</option>
+              <option value="swap">Swap A → B</option>
+            </select>
+          </label>
+
+          <label class="row">
+            <span>Token A mint</span>
+            <input id="mintA" type="text" placeholder="Base58 mint" />
+          </label>
+
+          <div class="row swap-only hidden mint-swap-row">
+            <span aria-hidden="true"></span>
+            <button id="swapMintsBtn" type="button" class="secondary mint-swap-btn" title="Swap token A and B">
+              ⇅ Swap A ↔ B
+            </button>
+          </div>
+
+          <label class="row swap-only hidden">
+            <span>Token B mint</span>
+            <input id="mintB" type="text" placeholder="Base58 mint" />
+          </label>
+
+          <div id="resolveOut" class="resolve-out muted"></div>
+
+          <label class="row trade-only">
+            <span>Side</span>
+            <select id="side">
+              <option value="buy">Buy</option>
+              <option value="sell">Sell</option>
+            </select>
+          </label>
+
+          <div class="row input-amount-row">
+            <span id="inputLabel">You pay (quote)</span>
+            <div class="input-amount-col">
+              <input id="inputAmount" type="text" inputmode="decimal" placeholder="0.0" />
+              <div id="balancePctBtns" class="balance-pct-btns">
+                <button type="button" class="pct-btn secondary" data-pct="10" disabled>10%</button>
+                <button type="button" class="pct-btn secondary" data-pct="25" disabled>25%</button>
+                <button type="button" class="pct-btn secondary" data-pct="50" disabled>50%</button>
+                <button type="button" class="pct-btn secondary" data-pct="100" disabled>MAX</button>
+              </div>
+            </div>
+          </div>
+
+          <label class="row">
+            <span>Slippage %</span>
+            <input id="slippage" type="number" min="0" max="50" step="0.1" value="1" />
+          </label>
+
+          <label class="row">
+            <span>Priority</span>
+            <select id="priorityTier">
+              <option value="low">Low</option>
+              <option value="medium" selected>Medium</option>
+              <option value="high">High</option>
+            </select>
+          </label>
+
+          <section id="quotePanel" class="quote-panel quote-panel--idle" aria-live="polite">
+            <div class="quote-hero">
+              <span class="quote-hero-eyebrow" id="quoteHeroEyebrow">Quote</span>
+              <div class="quote-hero-row">
+                <span class="quote-hero-amount" id="quoteHeroAmount">—</span>
+                <span class="quote-hero-unit" id="quoteHeroUnit"></span>
+              </div>
+              <p class="quote-hero-min" id="quoteHeroMin">Enter amount to get a quote.</p>
+            </div>
+            <dl class="quote-stats hidden" id="quoteStats"></dl>
+            <div class="quote-alerts" id="quoteAlerts"></div>
+            <details class="quote-tech hidden" id="quoteTech">
+              <summary>Build snapshot</summary>
+              <div class="quote-tech-body" id="quoteTechBody"></div>
+            </details>
+          </section>
+
+          <button id="quoteBtn" type="button">Quote now</button>
+
+          <button id="buildSignBtn" type="button" disabled>Build &amp; sign</button>
+        </section>
+      </div>
+
+      <aside class="panel-right" id="txInspector">
+        <div class="inspector-header">
+          <h2>Transaction inspector</h2>
+          <p id="inspectorStatus" class="inspector-status muted">Build a transaction to inspect instructions.</p>
         </div>
-      </section>
-
-      <section class="card">
-        <label class="row">
-          <span>Mode</span>
-          <select id="mode">
-            <option value="trade">Trade</option>
-            <option value="swap">Swap A → B</option>
-          </select>
-        </label>
-
-        <label class="row">
-          <span>Token A mint</span>
-          <input id="mintA" type="text" placeholder="Base58 mint" />
-        </label>
-
-        <label class="row swap-only hidden">
-          <span>Token B mint</span>
-          <input id="mintB" type="text" placeholder="Base58 mint" />
-        </label>
-
-        <div id="resolveOut" class="resolve-out muted"></div>
-
-        <label class="row trade-only">
-          <span>Side</span>
-          <select id="side">
-            <option value="buy">Buy</option>
-            <option value="sell">Sell</option>
-          </select>
-        </label>
-
-        <label class="row">
-          <span id="inputLabel">You pay (quote)</span>
-          <input id="inputAmount" type="text" inputmode="decimal" placeholder="0.0" />
-        </label>
-
-        <label class="row">
-          <span>Slippage %</span>
-          <input id="slippage" type="number" min="0" max="50" step="0.1" value="1" />
-        </label>
-
-        <label class="row">
-          <span>Priority</span>
-          <select id="priorityTier">
-            <option value="low">Low</option>
-            <option value="medium" selected>Medium</option>
-            <option value="high">High</option>
-          </select>
-        </label>
-
-        <div id="quoteOut" class="quote-out muted">Enter amount to quote.</div>
-
-        <button id="quoteBtn" type="button">Quote now</button>
-
-        <button id="buildSignBtn" type="button" disabled>Build &amp; sign</button>
-        <div id="buildOut" class="quote-out muted">
-          Connect wallet, quote, then build &amp; sign. Build uses frozen quote amounts (no re-quote).
-        </div>
-      </section>
-    </main>
+        <div id="inspectorBanner" class="inspector-banner hidden" aria-live="polite"></div>
+        <div id="inspectorMeta" class="inspector-meta hidden"></div>
+        <div id="inspectorInstructions" class="inspector-instructions"></div>
+        <details id="inspectorRaw" class="inspector-raw hidden">
+          <summary>Raw JSON</summary>
+          <pre id="inspectorRawPre"></pre>
+        </details>
+      </aside>
+    </div>
     <script src="/app.js" type="module"></script>
   </body>
 </html>

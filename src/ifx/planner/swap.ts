@@ -6,10 +6,7 @@ import {
   structuredCpiPatch,
   type FrameScratch,
 } from "@ifx-run/sdk";
-import {
-  createSyncNativeInstruction,
-  createTransferInstruction,
-} from "@solana/spl-token";
+import { createTransferInstruction } from "@solana/spl-token";
 import {
   PublicKey,
   SystemProgram,
@@ -21,7 +18,6 @@ import type { TokenBuildAccounts } from "../../pump/accounts.js";
 import {
   buyExactQuoteInV2Instruction,
   idempotentAtaCreate,
-  isNativeQuoteMint,
   sellV2Instruction,
   userBaseAta,
   userQuoteAta,
@@ -31,7 +27,6 @@ import { BUY_EXACT_QUOTE_IN_V2_SPENDABLE_QUOTE_IN_OFFSET } from "../../pump/patc
 import { minOutRaw } from "../../util/amount.js";
 import type { SponsorPlan } from "../../sponsor/plan.js";
 import { swapHop2AtaSpecs } from "../../sponsor/ata-specs.js";
-import { appendConditionalCloseAta } from "./close-ata.js";
 import { asIfxLetAccount } from "../let-account.js";
 import {
   appendSponsorAtaBootstrap,
@@ -79,7 +74,7 @@ function patchedTokenTransfer(
   );
 }
 
-/** A → quote → B: sell hop1, close A input ATA, fee, patched buy hop2, close quote input ATA. */
+/** A → quote → B: sell hop1, fee, patched buy hop2. */
 export async function appendSwapInstructions(
   out: TransactionInstruction[],
   params: SwapBuildParams
@@ -106,11 +101,6 @@ export async function appendSwapInstructions(
   const quoteMint = accountsA.quoteMint;
   const quoteTokenProgram = accountsA.quoteTokenProgram;
   const quoteAtaPk = userQuoteAta(user, quoteMint, quoteTokenProgram);
-  const baseAAta = userBaseAta(
-    accountsA.mint,
-    user,
-    accountsA.baseTokenProgram
-  );
   const baseBAta = userBaseAta(
     accountsB.mint,
     user,
@@ -155,15 +145,6 @@ export async function appendSwapInstructions(
       baseAmountIn,
       minQuoteOut: sellMinQuoteOut,
     })
-  );
-
-  appendConditionalCloseAta(
-    scratch,
-    out,
-    baseAAta,
-    user,
-    user,
-    accountsA.baseTokenProgram
   );
 
   const afterSell = scratch.letBuilder();
@@ -213,8 +194,7 @@ export async function appendSwapInstructions(
         sponsorRepay
       );
     }
-    out.push(patchedSolTransfer(scratch, user, quoteAtaPk, netQuote));
-    out.push(createSyncNativeInstruction(quoteAtaPk));
+    // Legacy SOL hop-2 debits native lamports; no WSOL wrap.
   } else {
     const operatorQuoteAta = quoteAta(
       feeRecipient,
@@ -261,15 +241,6 @@ export async function appendSwapInstructions(
         ],
       }).build()
     )
-  );
-
-  appendConditionalCloseAta(
-    scratch,
-    out,
-    quoteAtaPk,
-    user,
-    user,
-    quoteTokenProgram
   );
 }
 
