@@ -33,6 +33,7 @@ const quoteBody = z.object({
   slippageBps: z.number().int().min(0).max(5000).optional(),
   userPubkey: z.string().optional(),
   priorityTier: z.enum(["low", "medium", "high"]).optional(),
+  useSponsor: z.boolean().optional(),
 });
 
 const quoteSnapshotBody = z

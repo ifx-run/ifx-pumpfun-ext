@@ -1,25 +1,29 @@
 import { PublicKey } from "@solana/web3.js";
 
 import type { AppConfig, PriorityTier } from "../config/types.js";
-import type {
-  QuoteLabel,
-  QuoteRequest,
-  QuoteResponse,
-  TokenMeta,
-} from "../types/api.js";
-import { applyBps, formatRawToUi, minOutRaw, parseAmountToRaw } from "../util/amount.js";
+import type { QuoteRequest, QuoteResponse } from "../types/api.js";
+import { formatRawToUi, applyBps, minOutRaw, parseAmountToRaw } from "../util/amount.js";
 import type { PumpContext } from "./context.js";
 import { resolveTokens } from "./resolve.js";
 import { resolveBootstrapAtaSpecs } from "../sponsor/bootstrap-specs.js";
 import {
-  assertSponsorRepayCoverage,
-  sponsorQuoteHint,
-} from "../sponsor/plan.js";
+  appendSponsorRouteTags,
+  GAS_INSUFFICIENT_ERROR,
+  isSponsorEligibleRoute,
+  resolveSponsorDecision,
+  sponsorUiForBuy,
+  sponsorUiForSwap,
+  sponsorUiHidden,
+} from "../sponsor/ui-state.js";
+import { computeTxFeeLamports } from "../sponsor/fees.js";
+import { sumMissingAtaRent } from "../sponsor/rent.js";
 import { sellMinQuoteForSwap } from "../ifx/planner/swap.js";
 import {
   computeInputLimit,
   fetchWalletBalances,
 } from "../wallet/balances.js";
+import { effectiveTradeSide, isBuyTrade } from "./trade-side.js";
+import type { TokenMeta } from "../types/api.js";
 
 function serviceFeeRaw(basis: bigint, bps: number): bigint {
   return applyBps(basis, bps);
@@ -124,7 +128,7 @@ async function quoteSwap(
     expectedOutputUi: formatRawToUi(expectedB, tokenB.decimals),
     minOutputRaw: minOutRaw(expectedB, slippageBps).toString(),
     serviceFeeRaw: fee.toString(),
-    serviceFeeLabel: tokenA.quoteLabel as QuoteLabel,
+    serviceFeeLabel: tokenA.quoteLabel as QuoteResponse["serviceFeeLabel"],
     netQuoteRaw: netQuote.toString(),
     route: [
       "pump.sell_v2",
@@ -134,6 +138,112 @@ async function quoteSwap(
       "ifx.smart_close?",
     ],
     ixKind: "swap_a_b",
+  };
+}
+
+async function attachSponsorFields(
+  pump: PumpContext,
+  config: AppConfig,
+  req: QuoteRequest,
+  response: QuoteResponse,
+  side: "buy" | "sell",
+  slippageBps: number,
+  priorityTier: PriorityTier,
+  walletSolRaw?: bigint
+): Promise<QuoteResponse> {
+  const quoteLabel = response.serviceFeeLabel;
+
+  if (isBuyTrade(req.mode, side)) {
+    return {
+      ...response,
+      sponsorUi: sponsorUiForBuy(config, quoteLabel),
+    };
+  }
+
+  if (req.mode === "swap") {
+    const sponsorUi = sponsorUiForSwap(config, quoteLabel);
+    if (!req.userPubkey || walletSolRaw === undefined) {
+      return { ...response, sponsorUi };
+    }
+
+    const bootstrapSpecs = await resolveBootstrapAtaSpecs(pump, config, {
+      mode: req.mode,
+      side,
+      mintA: req.mintA,
+      mintB: req.mintB,
+    });
+    const userTxFee = computeTxFeeLamports(config, priorityTier, 1);
+    const missingAtaRent = await sumMissingAtaRent(
+      pump.connection,
+      new PublicKey(req.userPubkey),
+      bootstrapSpecs
+    );
+    const userSelfPayLamports = userTxFee + missingAtaRent;
+    if (walletSolRaw < userSelfPayLamports) {
+      throw new Error(GAS_INSUFFICIENT_ERROR);
+    }
+
+    return {
+      ...response,
+      sponsorUi,
+      sponsor: {
+        pubkey: config.sponsor.pubkey,
+        active: false,
+        feePayer: "user",
+        settleLamports: "0",
+        repayLamports: "0",
+        txFeeLamports: userTxFee.toString(),
+        missingAtaRentLamports: missingAtaRent.toString(),
+        userSelfPayLamports: userSelfPayLamports.toString(),
+        repaidFrom: null,
+      },
+    };
+  }
+
+  if (!isSponsorEligibleRoute(config, req.mode, side, quoteLabel)) {
+    return {
+      ...response,
+      sponsorUi: sponsorUiHidden(),
+    };
+  }
+
+  if (!req.userPubkey || walletSolRaw === undefined) {
+    return {
+      ...response,
+      sponsorUi: {
+        visible: true,
+        mode: "optional",
+        enabled: false,
+        readonly: false,
+        hint: "Connect wallet to estimate gas and sponsored repay",
+      },
+    };
+  }
+
+  const bootstrapSpecs = await resolveBootstrapAtaSpecs(pump, config, {
+    mode: req.mode,
+    side,
+    mintA: req.mintA,
+    mintB: req.mintB,
+  });
+
+  const decision = await resolveSponsorDecision(pump.connection, config, {
+    mode: req.mode,
+    side,
+    quote: response,
+    slippageBps,
+    priorityTier,
+    user: new PublicKey(req.userPubkey),
+    walletSolRaw,
+    bootstrapSpecs,
+    useSponsorRequest: req.useSponsor,
+  });
+
+  return {
+    ...response,
+    route: appendSponsorRouteTags(response.route, req.mode, side, decision.useSponsor),
+    sponsorUi: decision.sponsorUi,
+    ...(decision.details ? { sponsor: decision.details } : {}),
   };
 }
 
@@ -151,6 +261,9 @@ export async function quoteTrade(
   );
   const slippageBps = req.slippageBps;
   const serviceFeeBps = config.serviceFee.bps;
+  const side = effectiveTradeSide(req.mode, req.side);
+  const priorityTier = (req.priorityTier ??
+    config.priorityFee.defaultTier) as PriorityTier;
 
   let response: QuoteResponse;
 
@@ -168,37 +281,29 @@ export async function quoteTrade(
       slippageBps,
       serviceFeeBps
     );
+  } else if (side === "buy") {
+    response = await quoteBuy(
+      pump,
+      resolved.tokenA,
+      req.inputAmount,
+      slippageBps,
+      serviceFeeBps
+    );
   } else {
-    const side = req.side ?? "buy";
-    if (side === "buy") {
-      response = await quoteBuy(
-        pump,
-        resolved.tokenA,
-        req.inputAmount,
-        slippageBps,
-        serviceFeeBps
-      );
-    } else {
-      response = await quoteSell(
-        pump,
-        resolved.tokenA,
-        req.inputAmount,
-        slippageBps,
-        serviceFeeBps
-      );
-    }
+    response = await quoteSell(
+      pump,
+      resolved.tokenA,
+      req.inputAmount,
+      slippageBps,
+      serviceFeeBps
+    );
   }
 
-  const quoteLabel = response.serviceFeeLabel;
-  const side = req.side ?? "buy";
-  const priorityTier = (req.priorityTier ??
-    config.priorityFee.defaultTier) as PriorityTier;
-
   let result: QuoteResponse = response;
+  let walletSolRaw: bigint | undefined;
 
   if (req.userPubkey) {
-    const needsBase =
-      req.mode === "swap" || (req.side ?? "buy") === "sell";
+    const needsBase = req.mode === "swap" || side === "sell";
     const wallet =
       resolved.wallet ??
       (await fetchWalletBalances(
@@ -207,61 +312,27 @@ export async function quoteTrade(
         new PublicKey(req.userPubkey),
         needsBase ? resolved.tokenA : undefined
       ));
+    walletSolRaw = BigInt(wallet.solRaw);
     const inputLimit = computeInputLimit({
       mode: req.mode,
       side,
       tokenA: resolved.tokenA,
       inputRaw: BigInt(response.inputRaw),
       wallet,
-      sponsorEnabled: config.sponsor.enabled,
     });
     result = { ...result, wallet, inputLimit };
   }
 
-  if (config.sponsor.enabled && quoteLabel === "SOL") {
-    const bootstrapSpecs = await resolveBootstrapAtaSpecs(pump, config, {
-      mode: req.mode,
-      side,
-      mintA: req.mintA,
-      mintB: req.mintB,
-    });
-    const user = req.userPubkey
-      ? new PublicKey(req.userPubkey)
-      : undefined;
-    const sponsor = await sponsorQuoteHint(pump.connection, config, {
-      quoteLabel,
-      priorityTier,
-      user,
-      bootstrapSpecs,
-    });
-    if (sponsor) {
-      const repayLamports = BigInt(sponsor.estimatedLamports);
-      if (req.mode === "swap") {
-        const quoteDeltaEst =
-          BigInt(response.serviceFeeRaw) + BigInt(response.netQuoteRaw);
-        assertSponsorRepayCoverage(
-          sellMinQuoteForSwap(quoteDeltaEst, slippageBps),
-          BigInt(response.serviceFeeRaw),
-          repayLamports
-        );
-      } else if (side === "sell") {
-        assertSponsorRepayCoverage(
-          BigInt(response.minOutputRaw),
-          BigInt(response.serviceFeeRaw),
-          repayLamports
-        );
-      }
-
-      const route = [...result.route];
-      if (req.mode === "swap" || side === "buy") {
-        route.unshift("sponsor.bootstrap");
-      }
-      if (req.mode === "swap" || side === "sell") {
-        route.push("sponsor.repay");
-      }
-      return { ...result, sponsor, route };
-    }
-  }
+  result = await attachSponsorFields(
+    pump,
+    config,
+    req,
+    result,
+    side,
+    slippageBps,
+    priorityTier,
+    walletSolRaw
+  );
 
   return result;
 }

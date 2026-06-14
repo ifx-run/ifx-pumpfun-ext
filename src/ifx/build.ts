@@ -19,7 +19,6 @@ import {
 } from "../ifx/planner/close-ata.js";
 import { serviceFeeTransferIx } from "../ifx/planner/service-fee.js";
 import {
-  appendSponsorAtaBootstrap,
   appendSponsorRepay,
 } from "../ifx/planner/sponsor.js";
 import { scratchForBuild } from "../ifx/frames.js";
@@ -37,10 +36,10 @@ import {
 import { resolveBootstrapAtaSpecs } from "../sponsor/bootstrap-specs.js";
 import { buyAtaSpecs } from "../sponsor/ata-specs.js";
 import {
-  assertSponsorRepayCoverage,
-  resolveSponsorPlan,
+  inactiveSponsorPlan,
   type SponsorPlan,
 } from "../sponsor/plan.js";
+import { resolveSponsorDecision } from "../sponsor/ui-state.js";
 import {
   computeInputLimit,
   fetchWalletBalances,
@@ -49,6 +48,8 @@ import { inspectVersionedTransaction } from "../util/tx-inspect.js";
 import {
   assertTransactionSize,
   fitsTransactionSize,
+  isTxCompileSizeError,
+  TX_TOO_LARGE_HINT,
 } from "../util/transaction-size.js";
 import { logError } from "../util/log-error.js";
 import { getAddressLookupTables } from "../solana/alt.js";
@@ -65,6 +66,7 @@ import type {
   QuoteSnapshot,
 } from "../types/api.js";
 import { errorMessage } from "../util/log-error.js";
+import { effectiveTradeSide } from "../pump/trade-side.js";
 
 async function runBuildPhase<T>(
   phase: string,
@@ -135,6 +137,8 @@ async function resolveQuoteForBuild(
     inputAmount: req.inputAmount,
     slippageBps: req.slippageBps ?? config.quote.defaultSlippageBps,
     userPubkey: req.userPubkey,
+    priorityTier: req.priorityTier,
+    useSponsor: req.useSponsor,
   });
 }
 
@@ -177,19 +181,34 @@ async function finalizeTx(
     return { versionedTx, serialized };
   };
 
+  const tryCompile = (
+    instructions: TransactionInstruction[]
+  ): { versionedTx: VersionedTransaction; serialized: Uint8Array } | null => {
+    try {
+      return compile(instructions);
+    } catch (err) {
+      if (isTxCompileSizeError(err)) return null;
+      throw err;
+    }
+  };
+
   let instructions = tx.instructions;
   let smartCloseApplied = false;
 
   if (smartCloseIxs.length > 0) {
     const withClose = [...instructions, ...smartCloseIxs];
-    const attempt = compile(withClose);
-    if (fitsTransactionSize(attempt.serialized)) {
+    const attempt = tryCompile(withClose);
+    if (attempt && fitsTransactionSize(attempt.serialized)) {
       instructions = withClose;
       smartCloseApplied = true;
     }
   }
 
-  const { serialized, versionedTx } = compile(instructions);
+  const compiled = tryCompile(instructions);
+  if (!compiled) {
+    throw new Error(TX_TOO_LARGE_HINT);
+  }
+  const { serialized, versionedTx } = compiled;
   assertTransactionSize(serialized);
 
   let partiallySignedBy: string[] | undefined;
@@ -226,8 +245,7 @@ async function buildSwapTransaction(
   pump: PumpContext,
   config: AppConfig,
   req: BuildTradeParams,
-  quote: QuoteResponse,
-  sponsor: SponsorPlan
+  quote: QuoteResponse
 ): Promise<BuildTxResponse> {
   if (!req.mintB) throw new Error("mintB required for swap mode");
 
@@ -246,14 +264,6 @@ async function buildSwapTransaction(
   const quoteDeltaEst =
     BigInt(quote.serviceFeeRaw) + BigInt(quote.netQuoteRaw);
   const sellMinQuote = sellMinQuoteForSwap(quoteDeltaEst, slippageBps);
-
-  if (sponsor.active && quote.serviceFeeLabel === "SOL") {
-    assertSponsorRepayCoverage(
-      sellMinQuote,
-      BigInt(quote.serviceFeeRaw),
-      sponsor.repayLamports
-    );
-  }
 
   const { scratch, framePubkey } = scratchForBuild(
     config.ifx.publicFrames,
@@ -275,8 +285,6 @@ async function buildSwapTransaction(
     hop2MinBaseOut: BigInt(quote.minOutputRaw),
     feeRecipient: new PublicKey(config.serviceFee.pubkey),
     serviceFeeBps: config.serviceFee.bps,
-    repayBufferPercent: config.sponsor.repayBufferPercent,
-    sponsor,
   });
   tx.add(...swapIxs);
 
@@ -314,7 +322,7 @@ async function buildSwapTransaction(
     user,
     tx,
     framePubkey,
-    sponsor,
+    inactiveSponsorPlan(config),
     smartCloseIxs,
     req.blockhashCtx
   );
@@ -351,21 +359,12 @@ async function buildSingleHopTransaction(
     accounts.quoteTokenProgram
   );
 
-  const side = req.side ?? "buy";
+  const side = effectiveTradeSide(req.mode, req.side);
 
   if (side === "buy") {
-    const ataSpecs = buyAtaSpecs(accounts);
-    const ifxIxs: TransactionInstruction[] = [];
-    if (sponsor.active) {
-      appendSponsorAtaBootstrap(scratch, ifxIxs, sponsor.pubkey, user, ataSpecs);
-    } else {
-      for (const spec of ataSpecs) {
-        ifxIxs.push(
-          idempotentAtaCreate(user, user, spec.mint, spec.tokenProgram)
-        );
-      }
+    for (const spec of buyAtaSpecs(accounts)) {
+      tx.add(idempotentAtaCreate(user, user, spec.mint, spec.tokenProgram));
     }
-    tx.add(...ifxIxs);
 
     if (feeRaw > 0n) {
       tx.add(
@@ -425,11 +424,14 @@ async function buildSingleHopTransaction(
     }
 
     if (sponsor.active && quote.serviceFeeLabel === "SOL") {
-      assertSponsorRepayCoverage(
-        BigInt(quote.minOutputRaw),
-        feeRaw,
+      if (
+        BigInt(quote.minOutputRaw) - feeRaw <
         sponsor.repayLamports
-      );
+      ) {
+        throw new Error(
+          "Insufficient SOL for transaction gas and rent — wallet balance is too low and trade proceeds cannot cover fees"
+        );
+      }
       const sponsorIxs: TransactionInstruction[] = [];
       appendSponsorRepay(scratch, sponsorIxs, user, sponsor.pubkey, {
         txFeeLamports: sponsor.txFeeLamports,
@@ -492,7 +494,7 @@ export async function buildTradeTransaction(
   );
 
   const user = new PublicKey(req.userPubkey);
-  const side = req.side ?? "buy";
+  const side = effectiveTradeSide(req.mode, req.side);
   const needsBase = req.mode === "swap" || side === "sell";
   const resolved = await runBuildPhase(
     "resolveTokens",
@@ -516,7 +518,6 @@ export async function buildTradeTransaction(
     tokenA: resolved.tokenA,
     inputRaw: BigInt(quote.inputRaw),
     wallet,
-    sponsorEnabled: config.sponsor.enabled,
   });
   if (limit.exceedsBalance) {
     throw new Error(limit.hint ?? "input exceeds wallet balance");
@@ -533,22 +534,40 @@ export async function buildTradeTransaction(
       }),
     buildCtx
   );
-  const sponsor = await runBuildPhase(
-    "resolveSponsorPlan",
-    () =>
-      resolveSponsorPlan(pump.connection, config, {
-        quoteLabel: quote.serviceFeeLabel,
-        priorityTier: req.priorityTier,
-        user,
-        bootstrapSpecs,
-      }),
-    { ...buildCtx, sponsorEnabled: config.sponsor.enabled }
-  );
+
+  const slippageBps = req.slippageBps ?? config.quote.defaultSlippageBps;
+  let sponsor: SponsorPlan = inactiveSponsorPlan(config);
+  if (req.mode === "trade" && side === "sell") {
+    if (req.userPubkey) {
+      const decision = await runBuildPhase(
+        "resolveSponsorDecision",
+        () =>
+          resolveSponsorDecision(pump.connection, config, {
+            mode: req.mode,
+            side,
+            quote,
+            slippageBps,
+            priorityTier: req.priorityTier,
+            user,
+            walletSolRaw: BigInt(wallet.solRaw),
+            bootstrapSpecs,
+            useSponsorRequest: req.useSponsor,
+          }),
+        { ...buildCtx, useSponsor: req.useSponsor }
+      );
+      sponsor = decision.plan;
+    }
+  }
 
   if (req.mode === "swap") {
+    if (req.useSponsor) {
+      throw new Error(
+        "Sponsored gas is not available for swaps — you pay gas and rent"
+      );
+    }
     return runBuildPhase(
       "assembleSwapTx",
-      () => buildSwapTransaction(pump, config, req, quote, sponsor),
+      () => buildSwapTransaction(pump, config, req, quote),
       buildCtx
     );
   }
@@ -601,6 +620,7 @@ export async function prepareTrade(
       slippageBps,
       userPubkey: req.userPubkey,
       priorityTier,
+      useSponsor: req.useSponsor,
       quoteSnapshot: quoteSnapshotFromResponse(quote),
       blockhashCtx,
     });

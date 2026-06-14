@@ -108,9 +108,8 @@ export function computeInputLimit(opts: {
   tokenA: TokenMeta;
   inputRaw: bigint;
   wallet: WalletBalances;
-  sponsorEnabled: boolean;
 }): InputLimitHint {
-  const { mode, side, tokenA, inputRaw, wallet, sponsorEnabled } = opts;
+  const { mode, side, tokenA, inputRaw, wallet } = opts;
 
   let asset: InputLimitHint["asset"];
   let maxRaw: bigint;
@@ -139,13 +138,8 @@ export function computeInputLimit(opts: {
 
   if (exceedsBalance) {
     hint = `Input exceeds ${assetLabel} balance (max ${maxUi})`;
-  } else if (
-    side === "buy" &&
-    tokenA.quoteLabel === "SOL" &&
-    !sponsorEnabled &&
-    maxRaw > 0n
-  ) {
-    hint = `SOL balance ${wallet.solUi} — fee payer is your wallet; leave headroom for tx fees`;
+  } else if (side === "buy" && tokenA.quoteLabel === "SOL" && maxRaw > 0n) {
+    hint = `SOL balance ${wallet.solUi} — leave headroom for tx gas and rent`;
   } else if (maxRaw === 0n) {
     hint = `No ${assetLabel} balance available for this trade`;
   }

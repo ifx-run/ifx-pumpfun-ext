@@ -28,6 +28,9 @@ let balanceRefreshTimer;
 let blockhashTimer = null;
 let resolveInFlight = false;
 let resolvePending = false;
+/** User preference when sponsor toggle is optional (sell SOL). */
+let useSponsorPreference = false;
+let lastSponsorUi = null;
 /** When true, trade preview + inspector are frozen (Sign & Send in flight). */
 let rightPanelLocked = false;
 
@@ -115,6 +118,88 @@ function renderQuoteIdle(message = "Enter amount on the left to preview.") {
   $("summaryAlerts").innerHTML = "";
   $("summaryTech").classList.add("hidden");
   $("summaryTechBody").textContent = "";
+  hideSponsorUi();
+}
+
+function hideSponsorUi() {
+  $("sponsorRow").classList.add("hidden");
+  $("sponsorDetails").classList.add("hidden");
+  $("sponsorDetails").innerHTML = "";
+  $("sponsorHint").textContent = "";
+  $("sponsorWarning").textContent = "";
+  $("sponsorWarning").classList.add("hidden");
+  lastSponsorUi = null;
+}
+
+function sponsorToggleApplies() {
+  if (!publicConfig.sponsorEnabled) return false;
+  const mode = $("mode").value;
+  const side = $("side").value;
+  return mode === "trade" && side === "sell";
+}
+
+function renderSponsorUi(sponsorUi, sponsor) {
+  const row = $("sponsorRow");
+  const toggle = $("sponsorToggle");
+  const hint = $("sponsorHint");
+  const details = $("sponsorDetails");
+
+  if (!sponsorUi?.visible) {
+    hideSponsorUi();
+    return;
+  }
+
+  lastSponsorUi = sponsorUi;
+  row.classList.remove("hidden");
+  toggle.checked = !!sponsorUi.enabled;
+  toggle.disabled = !!sponsorUi.readonly;
+  row.classList.toggle("trade-sponsor-row--readonly", !!sponsorUi.readonly);
+  row.classList.toggle("trade-sponsor-row--forced", sponsorUi.mode === "forced");
+  hint.textContent = sponsorUi.hint ?? "";
+
+  const warn = $("sponsorWarning");
+  if (sponsor?.repayWarning) {
+    warn.textContent = sponsor.repayWarning;
+    warn.classList.remove("hidden");
+  } else {
+    warn.textContent = "";
+    warn.classList.add("hidden");
+  }
+
+  if (sponsor?.active) {
+    details.classList.remove("hidden");
+    details.innerHTML = [
+      summaryStatRow("Sponsored", "Yes"),
+      summaryStatRow("Sponsor", shortPubkey(sponsor.pubkey), sponsor.pubkey),
+      summaryStatRow(
+        "Repay (est.)",
+        `${formatQuoteAsset(sponsor.repayLamports, "SOL")} SOL`,
+        "Repaid from trade proceeds"
+      ),
+      summaryStatRow(
+        "Settle (est.)",
+        `${formatQuoteAsset(sponsor.settleLamports, "SOL")} SOL`,
+        "Gas + rent before buffer"
+      ),
+      summaryStatRow(
+        "Fee payer",
+        sponsor.feePayer === "sponsor" ? "Sponsor" : "Your wallet"
+      ),
+    ].join("");
+  } else if (sponsor) {
+    details.classList.remove("hidden");
+    details.innerHTML = [
+      summaryStatRow("Sponsored", "No"),
+      summaryStatRow("Fee payer", "Your wallet"),
+      summaryStatRow(
+        "Gas + rent (est.)",
+        `${formatQuoteAsset(sponsor.userSelfPayLamports, "SOL")} SOL`
+      ),
+    ].join("");
+  } else {
+    details.classList.add("hidden");
+    details.innerHTML = "";
+  }
 }
 
 function renderQuoteLoading() {
@@ -410,6 +495,9 @@ function applyPrepareResponse(data, opts = {}) {
 
   if (!touchUi) return;
 
+  if (data.sponsorUi?.readonly) {
+    useSponsorPreference = !!data.sponsorUi.enabled;
+  }
   renderQuote(data);
   syncWalletFromQuote(data);
 
@@ -570,6 +658,9 @@ function tradeBodyBase() {
   };
   if (mode === "trade") body.side = $("side").value;
   else body.mintB = $("mintB").value.trim();
+  if (sponsorToggleApplies() && walletPubkey) {
+    body.useSponsor = useSponsorPreference;
+  }
   return body;
 }
 
@@ -1217,11 +1308,8 @@ function renderQuote(q) {
   }
   updateSignSendBtn();
 
-  if (q.sponsor) {
-    const sponsorSol = formatQuoteAsset(q.sponsor.estimatedLamports, "SOL");
-    alerts.push(
-      `<div class="trade-alert info">Sponsor repay (est.): ~${sponsorSol} SOL</div>`
-    );
+  if (q.sponsorUi) {
+    renderSponsorUi(q.sponsorUi, q.sponsor);
   }
 
   if (q.build?.transactionSizeBytes != null) {
@@ -1297,6 +1385,16 @@ async function doQuote(opts = {}) {
   }
 }
 
+function onSponsorToggleChanged() {
+  if (rightPanelLocked || lastSponsorUi?.readonly) return;
+  useSponsorPreference = $("sponsorToggle").checked;
+  scheduleQuote();
+}
+
+function resetSponsorPreference() {
+  useSponsorPreference = false;
+}
+
 function onTradeInputChanged() {
   if (rightPanelLocked) {
     unlockRightPanel();
@@ -1360,11 +1458,13 @@ async function init() {
 
   $("mode").addEventListener("change", () => {
     updateModeUi();
+    resetSponsorPreference();
     doResolve();
   });
   $("side").addEventListener("change", () => {
     updateInputLabel();
     updateBalancePctButtons();
+    resetSponsorPreference();
     scheduleQuote();
   });
   $("mintA").addEventListener("change", doResolve);
@@ -1379,6 +1479,7 @@ async function init() {
   $("inputAmount").addEventListener("input", onTradeInputChanged);
   $("slippage").addEventListener("input", scheduleQuote);
   $("priorityTier").addEventListener("change", scheduleQuote);
+  $("sponsorToggle").addEventListener("change", onSponsorToggleChanged);
   document.querySelectorAll(".pct-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       applyBalancePercent(Number(btn.dataset.pct));

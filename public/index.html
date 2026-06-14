@@ -130,6 +130,18 @@
           </div>
 
           <p class="trade-summary-sub muted" id="summarySub">Enter amount on the left to preview.</p>
+          <div id="sponsorRow" class="trade-sponsor-row hidden">
+            <label class="sponsor-toggle-label" for="sponsorToggle">
+              <span class="sponsor-toggle-text">Sponsored gas</span>
+              <span class="sponsor-switch">
+                <input type="checkbox" id="sponsorToggle" role="switch" />
+                <span class="sponsor-switch-slider" aria-hidden="true"></span>
+              </span>
+            </label>
+            <p id="sponsorHint" class="trade-sponsor-hint muted"></p>
+            <p id="sponsorWarning" class="trade-sponsor-warning hidden" role="status"></p>
+            <dl id="sponsorDetails" class="trade-summary-stats trade-sponsor-details hidden"></dl>
+          </div>
           <dl class="trade-summary-stats hidden" id="summaryStats"></dl>
           <div class="trade-summary-alerts" id="summaryAlerts"></div>
           <details class="trade-summary-tech hidden" id="summaryTech">

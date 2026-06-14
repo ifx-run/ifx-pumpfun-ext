@@ -41,6 +41,32 @@ export type QuoteRequest = {
   slippageBps: number;
   userPubkey?: string;
   priorityTier?: string;
+  /** User choice for sell/swap SOL sponsor repay; ignored on buy. */
+  useSponsor?: boolean;
+};
+
+export type SponsorUiMode = "hidden" | "readonly_off" | "forced" | "optional";
+
+export type SponsorUiState = {
+  visible: boolean;
+  mode: SponsorUiMode;
+  enabled: boolean;
+  readonly: boolean;
+  hint?: string;
+};
+
+export type SponsorDetails = {
+  pubkey: string;
+  active: boolean;
+  feePayer: "user" | "sponsor";
+  settleLamports: string;
+  repayLamports: string;
+  txFeeLamports: string;
+  missingAtaRentLamports: string;
+  userSelfPayLamports: string;
+  repaidFrom: "trade_output" | null;
+  /** UI-only estimate when sponsor repay > 10% of min net receive. */
+  repayWarning?: string;
 };
 
 /** Estimated blockhash validity for UI countdown (slot time is approximate). */
@@ -67,10 +93,8 @@ export type QuoteResponse = {
   netQuoteRaw: string;
   route: string[];
   ixKind: "buy_exact_quote_in_v2" | "sell_v2" | "swap_a_b";
-  sponsor?: {
-    required: boolean;
-    estimatedLamports: string;
-  };
+  sponsorUi?: SponsorUiState;
+  sponsor?: SponsorDetails;
   wallet?: {
     solRaw: string;
     solUi: string;

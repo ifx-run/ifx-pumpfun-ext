@@ -64,10 +64,15 @@ export async function resolveSponsorPlan(
     priorityTier: PriorityTier;
     user: PublicKey;
     bootstrapSpecs: AtaSpec[];
+    useSponsor: boolean;
   }
 ): Promise<SponsorPlan> {
   const base = inactiveSponsorPlan(config);
-  if (!config.sponsor.enabled || opts.quoteLabel !== "SOL") {
+  if (
+    !opts.useSponsor ||
+    !config.sponsor.enabled ||
+    opts.quoteLabel !== "SOL"
+  ) {
     return base;
   }
   if (!config.sponsor.pubkey || !config.sponsor.keypairPath) {
@@ -101,38 +106,6 @@ export async function resolveSponsorPlan(
     repayLamports,
     txFeeLamports,
     missingAtaRentLamports,
-  };
-}
-
-export async function sponsorQuoteHint(
-  connection: Connection,
-  config: AppConfig,
-  opts: {
-    quoteLabel: QuoteLabel;
-    priorityTier: PriorityTier;
-    user?: PublicKey;
-    bootstrapSpecs: AtaSpec[];
-  }
-): Promise<{ required: boolean; estimatedLamports: string } | undefined> {
-  if (!config.sponsor.enabled || opts.quoteLabel !== "SOL") return undefined;
-
-  const user = opts.user ?? PublicKey.unique();
-  const missingAtaRentLamports = await sumMissingAtaRent(
-    connection,
-    user,
-    opts.bootstrapSpecs
-  );
-  const txFeeLamports = computeTxFeeLamports(
-    config,
-    opts.priorityTier,
-    sponsorTxSignatureCount()
-  );
-  const settle = missingAtaRentLamports + txFeeLamports;
-  const estimated = applyRepayBuffer(settle, config.sponsor.repayBufferPercent);
-
-  return {
-    required: true,
-    estimatedLamports: estimated.toString(),
   };
 }
 
