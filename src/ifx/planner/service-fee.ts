@@ -132,9 +132,10 @@ export function appendProceedsAfterSell(
     throw new Error("feeRecipient required when serviceFeeBps > 0");
   }
 
-  const fee = after.letEval(
-    expr.bpsMulFloor(quoteDelta, expr.u64(serviceFeeBps))
-  );
+  // Narrowest const that fits — saves wire vs u64 (SDK 0.1.3+ / program 0.1.2+).
+  const bpsExpr =
+    serviceFeeBps <= 0xff ? expr.u8(serviceFeeBps) : expr.u16(serviceFeeBps);
+  const fee = after.letEval(expr.bpsMulFloor(quoteDelta, bpsExpr));
   const netQuote = after.letEval(expr.sub(quoteDelta, fee));
   out.push(after.buildIx());
 

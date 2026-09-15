@@ -24,6 +24,18 @@ import {
   appendQuoteProceedsBaseline,
   type QuoteProceedsAccount,
 } from "./service-fee.js";
+import {
+  appendProceedsCoverRepayAssert,
+  appendSponsorAtaBootstrap,
+  appendSponsorRepayAmount,
+  appendSponsorRepayTransfer,
+} from "./sponsor.js";
+
+export type SwapSponsorRepay = {
+  pubkey: PublicKey;
+  txFeeLamports: bigint;
+  repayBufferPercent: number;
+};
 
 export type SwapBuildParams = {
   scratch: FrameScratch;
@@ -36,6 +48,8 @@ export type SwapBuildParams = {
   hop2MinBaseOut: bigint;
   feeRecipient: PublicKey;
   serviceFeeBps: number;
+  /** When set, hop2 spends netQuote − repay so leftover SOL can repay the sponsor. */
+  sponsor?: SwapSponsorRepay;
 };
 
 /** A → quote → B: sell hop1, on-chain fee split, patched buy hop2. */
@@ -54,6 +68,7 @@ export async function appendSwapInstructions(
     hop2MinBaseOut,
     feeRecipient,
     serviceFeeBps,
+    sponsor,
   } = params;
 
   if (!accountsA.quoteMint.equals(accountsB.quoteMint)) {
@@ -69,8 +84,21 @@ export async function appendSwapInstructions(
     accountsB.baseTokenProgram
   );
 
-  for (const spec of swapHop2AtaSpecs(accountsB)) {
-    out.push(idempotentAtaCreate(user, user, spec.mint, spec.tokenProgram));
+  const hop2Specs = swapHop2AtaSpecs(accountsB);
+  let ataCost: U64Binding | undefined;
+  if (sponsor) {
+    const boot = appendSponsorAtaBootstrap(
+      scratch,
+      out,
+      sponsor.pubkey,
+      user,
+      hop2Specs
+    );
+    ataCost = boot?.ataCost;
+  } else {
+    for (const spec of hop2Specs) {
+      out.push(idempotentAtaCreate(user, user, spec.mint, spec.tokenProgram));
+    }
   }
 
   const proceedsAccount: QuoteProceedsAccount = {
@@ -95,7 +123,7 @@ export async function appendSwapInstructions(
     })
   );
 
-  const { netQuote } = appendProceedsAfterSell(scratch, out, {
+  const { quoteDelta, fee, netQuote } = appendProceedsAfterSell(scratch, out, {
     account: proceedsAccount,
     quoteBefore,
     serviceFeeBps,
@@ -103,6 +131,23 @@ export async function appendSwapInstructions(
     quoteMint,
     quoteTokenProgram,
   });
+
+  let hop2Spendable = netQuote ?? quoteDelta;
+  let repay: U64Binding | undefined;
+  if (sponsor) {
+    if (quoteLabel !== "SOL") {
+      throw new Error("sponsored swap requires SOL quote");
+    }
+    repay = appendSponsorRepayAmount(scratch, out, {
+      txFeeLamports: sponsor.txFeeLamports,
+      repayBufferPercent: sponsor.repayBufferPercent,
+      ataCost,
+    });
+    appendProceedsCoverRepayAssert(scratch, out, quoteDelta, repay, fee);
+    const hop2Batch = scratch.letBuilder();
+    hop2Spendable = hop2Batch.letEval(expr.sub(hop2Spendable, repay));
+    out.push(hop2Batch.buildIx());
+  }
 
   const hop2Template = await buyExactQuoteInV2Instruction({
     global: accountsB.global,
@@ -123,12 +168,16 @@ export async function appendSwapInstructions(
         patches: [
           rawCpiPatch(
             BUY_EXACT_QUOTE_IN_V2_SPENDABLE_QUOTE_IN_OFFSET,
-            netQuote!
+            hop2Spendable
           ),
         ],
       }).build()
     )
   );
+
+  if (sponsor && repay) {
+    appendSponsorRepayTransfer(scratch, out, user, sponsor.pubkey, repay);
+  }
 }
 
 export function sellMinQuoteForSwap(

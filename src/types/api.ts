@@ -115,7 +115,7 @@ export type QuoteResponse = {
   };
   /** Present when quote runs with blockhash fetch (prepare flow). */
   blockhash?: BlockhashExpiry;
-  /** Unsigned v0 transaction — built in the same request as quote when wallet connected. */
+  /** Unsigned v1 transaction — built in the same request as quote when wallet connected. */
   build?: BuildTxResponse | null;
   buildSkippedReason?: BuildSkippedReason | null;
   buildError?: string;
@@ -155,8 +155,8 @@ export type BuildTxRequest = QuoteRequest & {
 
 export type BuildTxResponse = {
   transaction: string;
-  /** Always 0 — legacy transactions are not returned. */
-  transactionVersion: 0;
+  /** Always 1 — v0/legacy transactions are not returned. */
+  transactionVersion: 1;
   recentBlockhash: string;
   lastValidBlockHeight?: number;
   frameUsed?: string;
@@ -194,7 +194,7 @@ export type TxInstructionInspection = {
 };
 
 export type TxInspection = {
-  version: 0;
+  version: 1;
   numInstructions: number;
   staticAccountKeys: number;
   loadedWritableAccounts: number;
@@ -205,5 +205,10 @@ export type TxInspection = {
   feePayer?: string;
   smartCloseApplied?: boolean;
   transactionSizeBytes?: number;
+  transactionConfig?: {
+    computeUnitLimit: number;
+    loadedAccountsDataSizeLimit: number;
+    priorityFeeLamports: string;
+  };
   instructions: TxInstructionInspection[];
 };

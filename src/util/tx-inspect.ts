@@ -1,13 +1,10 @@
-import {
-  type AddressLookupTableAccount,
-  type VersionedTransaction,
-} from "@solana/web3.js";
 import { ifxIxHint } from "@ifx-run/sdk";
+import type { TransactionInstruction } from "@solana/web3.js";
 
 import type { TxInspection, TxInstructionInspection } from "../types/api.js";
 
 const PROGRAM_LABELS: Record<string, string> = {
-  "ComputeBudget111111111111111111111111111111": "Compute Budget",
+  ComputeBudget111111111111111111111111111111: "Compute Budget",
   "11111111111111111111111111111111": "System Program",
   TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA: "SPL Token",
   TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb: "Token-2022",
@@ -89,152 +86,86 @@ function decodeInstructionHint(
   return undefined;
 }
 
-function accountMetaFlags(
-  keyIndex: number,
-  staticKeyCount: number,
-  loadedWritable: number,
-  header: {
-    numRequiredSignatures: number;
-    numReadonlySignedAccounts: number;
-    numReadonlyUnsignedAccounts: number;
-  }
-): { isSigner: boolean; isWritable: boolean } {
-  const { numRequiredSignatures, numReadonlySignedAccounts, numReadonlyUnsignedAccounts } =
-    header;
+export type TransactionConfigInspection = {
+  computeUnitLimit: number;
+  loadedAccountsDataSizeLimit: number;
+  priorityFeeLamports: string;
+};
 
-  if (keyIndex < staticKeyCount) {
-    const isSigner = keyIndex < numRequiredSignatures;
-    if (isSigner) {
-      return {
-        isSigner: true,
-        isWritable: keyIndex < numRequiredSignatures - numReadonlySignedAccounts,
-      };
-    }
-    const unsignedIdx = keyIndex - numRequiredSignatures;
-    const numUnsigned = staticKeyCount - numRequiredSignatures;
-    return {
-      isSigner: false,
-      isWritable:
-        unsignedIdx < numUnsigned - numReadonlyUnsignedAccounts,
-    };
+function collectStaticKeys(
+  feePayer: string | undefined,
+  instructions: TransactionInstruction[]
+): string[] {
+  const keys: string[] = [];
+  const seen = new Set<string>();
+  const add = (pk: string) => {
+    if (seen.has(pk)) return;
+    seen.add(pk);
+    keys.push(pk);
+  };
+  if (feePayer) add(feePayer);
+  for (const ix of instructions) {
+    add(ix.programId.toBase58());
+    for (const k of ix.keys) add(k.pubkey.toBase58());
   }
-
-  const loadedIdx = keyIndex - staticKeyCount;
-  if (loadedIdx < loadedWritable) {
-    return { isSigner: false, isWritable: true };
-  }
-  return { isSigner: false, isWritable: false };
+  return keys;
 }
 
-function accountKeyResolution(
-  keyIndex: number,
-  staticKeyCount: number,
-  loadedWritable: number
-): "alt-writable" | "alt-readonly" | "static" {
-  if (keyIndex < staticKeyCount) return "static";
-  const loadedIdx = keyIndex - staticKeyCount;
-  if (loadedIdx < loadedWritable) return "alt-writable";
-  return "alt-readonly";
-}
-
-function buildAltTableAddressSet(
-  lookupTables: AddressLookupTableAccount[]
-): Set<string> {
-  const set = new Set<string>();
-  for (const table of lookupTables) {
-    for (const addr of table.state.addresses) {
-      set.add(addr.toBase58());
-    }
-  }
-  return set;
-}
-
-export function inspectVersionedTransaction(
-  tx: VersionedTransaction,
-  lookupTables: AddressLookupTableAccount[],
+/** Inspect a compiled v1 instruction list (all accounts inline; no ALTs). */
+export function inspectInstructions(
+  instructions: TransactionInstruction[],
   opts?: {
     ifxProgramId?: string;
     frameUsed?: string;
     feePayer?: string;
     smartCloseApplied?: boolean;
     transactionSizeBytes?: number;
-    addressLookupTableAddresses?: string[];
+    transactionConfig?: TransactionConfigInspection;
   }
 ): TxInspection {
-  const message = tx.message;
-  const accountKeys = message.getAccountKeys({
-    addressLookupTableAccounts: lookupTables,
+  const staticKeys = collectStaticKeys(opts?.feePayer, instructions);
+  const indexByKey = new Map(staticKeys.map((pk, i) => [pk, i]));
+
+  const inspected: TxInstructionInspection[] = instructions.map((ix, index) => {
+    const programId = ix.programId.toBase58();
+    const data = Buffer.from(ix.data);
+    const accounts = ix.keys.map((k) => {
+      const pubkey = k.pubkey.toBase58();
+      return {
+        index: indexByKey.get(pubkey) ?? -1,
+        pubkey,
+        isSigner: k.isSigner,
+        isWritable: k.isWritable,
+        altLoaded: false,
+        resolution: "static" as const,
+      };
+    });
+
+    return {
+      index,
+      programId,
+      programLabel: programLabel(programId, opts?.ifxProgramId),
+      hint: decodeInstructionHint(programId, data, opts?.ifxProgramId),
+      accounts,
+      dataHex: data.toString("hex"),
+      dataBase64: data.toString("base64"),
+      dataLength: data.length,
+    };
   });
 
-  const staticKeyCount = message.staticAccountKeys.length;
-  const loadedWritable = message.addressTableLookups.reduce(
-    (n, l) => n + l.writableIndexes.length,
-    0
-  );
-  const loadedReadonly = message.addressTableLookups.reduce(
-    (n, l) => n + l.readonlyIndexes.length,
-    0
-  );
-  const altTableAddresses = buildAltTableAddressSet(lookupTables);
-
-  const instructions: TxInstructionInspection[] = message.compiledInstructions.map(
-    (ix, index) => {
-      const programId = accountKeys.get(ix.programIdIndex)!.toBase58();
-      const data = Buffer.from(ix.data);
-      const accounts = ix.accountKeyIndexes.map((keyIndex) => {
-        const flags = accountMetaFlags(
-          keyIndex,
-          staticKeyCount,
-          loadedWritable,
-          message.header
-        );
-        const pubkey = accountKeys.get(keyIndex)!.toBase58();
-        const resolution = accountKeyResolution(
-          keyIndex,
-          staticKeyCount,
-          loadedWritable
-        );
-        const inAltTable = altTableAddresses.has(pubkey);
-        return {
-          index: keyIndex,
-          pubkey,
-          isSigner: flags.isSigner,
-          isWritable: flags.isWritable,
-          /** Resolved via ALT lookup (v0 size win). */
-          altLoaded: resolution !== "static",
-          resolution,
-          /** Pubkey is listed in a configured ALT but serialized static in this tx. */
-          inAltTableUnused: resolution === "static" && inAltTable,
-        };
-      });
-
-      const hint = decodeInstructionHint(programId, data, opts?.ifxProgramId);
-
-      return {
-        index,
-        programId,
-        programLabel: programLabel(programId, opts?.ifxProgramId),
-        hint,
-        accounts,
-        dataHex: data.toString("hex"),
-        dataBase64: data.toString("base64"),
-        dataLength: data.length,
-      };
-    }
-  );
-
   return {
-    version: 0,
-    numInstructions: instructions.length,
-    staticAccountKeys: staticKeyCount,
-    loadedWritableAccounts: loadedWritable,
-    loadedReadonlyAccounts: loadedReadonly,
-    totalAccountKeys: accountKeys.length,
-    addressLookupTables: opts?.addressLookupTableAddresses ?? [],
+    version: 1,
+    numInstructions: inspected.length,
+    staticAccountKeys: staticKeys.length,
+    loadedWritableAccounts: 0,
+    loadedReadonlyAccounts: 0,
+    totalAccountKeys: staticKeys.length,
+    addressLookupTables: [],
     frameUsed: opts?.frameUsed,
     feePayer: opts?.feePayer,
     smartCloseApplied: opts?.smartCloseApplied,
     transactionSizeBytes: opts?.transactionSizeBytes,
-    instructions,
+    transactionConfig: opts?.transactionConfig,
+    instructions: inspected,
   };
 }

@@ -27,7 +27,7 @@ export type AppConfig = {
   solana: {
     rpcUrl: string;
     commitment: "processed" | "confirmed" | "finalized";
-    /** On-chain ALT pubkeys — compiled into every v0 transaction. */
+    /** Unused for v1 compiles (v1 has no ALTs). Kept so existing configs still load. */
     addressLookupTables: string[];
   };
   ifx: { programId: string; publicFrames: string[] };

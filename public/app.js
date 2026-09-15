@@ -1,4 +1,4 @@
-import { Connection, VersionedTransaction } from "@solana/web3.js";
+import { Connection } from "@solana/web3.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -686,7 +686,26 @@ function decodeTxBase64(b64) {
   const bin = atob(b64);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return VersionedTransaction.deserialize(bytes);
+  return bytes;
+}
+
+function isV1WalletError(err) {
+  const msg = String(err?.message ?? err).toLowerCase();
+  return (
+    msg.includes("serialization of version 1") ||
+    msg.includes("version 1 transaction") ||
+    msg.includes("supportedtransactionversions") ||
+    msg.includes("unsupported transaction version")
+  );
+}
+
+function walletV1Error(err) {
+  if (isV1WalletError(err)) {
+    return new Error(
+      "This wallet cannot sign Solana v1 transactions yet. Update Phantom or Solflare and retry."
+    );
+  }
+  return err;
 }
 
 async function connectWallet() {
@@ -766,21 +785,36 @@ async function fetchTxExecutionResult(connection, signature) {
 }
 
 async function signAndSend(connection, built) {
-  const tx = decodeTxBase64(built.transaction);
+  const bytes = decodeTxBase64(built.transaction);
+  const duck = { serialize: () => bytes };
 
   let signature;
-  if (walletProvider.signAndSendTransaction) {
-    const result = await walletProvider.signAndSendTransaction(tx, {
-      skipPreflight: false,
-    });
-    signature =
-      typeof result === "string" ? result : result.signature?.toString?.() ?? String(result);
-  } else {
-    const signed = await walletProvider.signTransaction(tx);
-    signature = await connection.sendRawTransaction(signed.serialize(), {
+  const sendWith = async (arg) => {
+    if (walletProvider.signAndSendTransaction) {
+      const result = await walletProvider.signAndSendTransaction(arg, {
+        skipPreflight: false,
+      });
+      return typeof result === "string"
+        ? result
+        : result.signature?.toString?.() ?? String(result);
+    }
+    const signed = await walletProvider.signTransaction(arg);
+    const signedBytes =
+      signed instanceof Uint8Array
+        ? signed
+        : typeof signed?.serialize === "function"
+          ? signed.serialize()
+          : bytes;
+    return connection.sendRawTransaction(signedBytes, {
       skipPreflight: false,
       preflightCommitment: "confirmed",
     });
+  };
+
+  try {
+    signature = await sendWith(duck);
+  } catch (err) {
+    throw walletV1Error(err);
   }
 
   await connection.confirmTransaction(
@@ -945,19 +979,26 @@ function renderTxInspector(inspection, statusText) {
         ? "applied"
         : "skipped (size)";
 
+  const cfg = inspection.transactionConfig;
+  const cfgHtml = cfg
+    ? `<div class="meta-kv"><span>CU limit</span><code>${Number(cfg.computeUnitLimit).toLocaleString()}</code></div>
+    <div class="meta-kv"><span>Priority fee</span><code>${cfg.priorityFeeLamports} lamports</code></div>
+    <div class="meta-kv"><span>Loaded accounts</span><code>${Number(cfg.loadedAccountsDataSizeLimit).toLocaleString()} B</code></div>`
+    : "";
+
   meta.innerHTML = `
     <div class="meta-kv"><span>Version</span><code>v${inspection.version}</code></div>
     <div class="meta-kv"><span>Instructions</span><code>${inspection.numInstructions}</code></div>
-    <div class="meta-kv"><span>Tx size</span><code>${inspection.transactionSizeBytes ?? "—"} B</code></div>
-    <div class="meta-kv"><span>Account keys</span><code>${inspection.totalAccountKeys} (${inspection.staticAccountKeys} static + ${inspection.loadedWritableAccounts}W/${inspection.loadedReadonlyAccounts}R ALT)</code></div>
+    <div class="meta-kv"><span>Tx size</span><code>${inspection.transactionSizeBytes ?? "—"} B / 4096</code></div>
+    <div class="meta-kv"><span>Account keys</span><code>${inspection.totalAccountKeys} inline (v1, no ALT)</code></div>
+    ${cfgHtml}
     <div class="meta-kv"><span>Frame</span><code>${inspection.frameUsed ?? "—"}</code></div>
     <div class="meta-kv"><span>Fee payer</span><code>${inspection.feePayer ?? "—"}</code></div>
     <div class="meta-kv"><span>Smart close</span><code>${smartClose}</code></div>
-    <div class="meta-kv"><span>ALTs</span><code>${inspection.addressLookupTables?.length ?? 0}</code></div>
   `;
 
   status.title =
-    "Resolve: ALT = loaded via lookup table (size win). static = full pubkey in message. static† = in ALT table but static (signers must stay static). No automatic compression for system programs without ALT.";
+    "v1 transactions carry resource limits in the message config (not ComputeBudget instructions) and inline every account — ALTs are not used.";
 
   list.innerHTML = inspection.instructions
     .map(

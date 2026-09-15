@@ -1,10 +1,7 @@
 import {
-  ComputeBudgetProgram,
   PublicKey,
   Transaction,
   TransactionInstruction,
-  TransactionMessage,
-  VersionedTransaction,
 } from "@solana/web3.js";
 
 import type { AppConfig, PriorityTier } from "../config/types.js";
@@ -44,7 +41,7 @@ import {
   computeInputLimit,
   fetchWalletBalances,
 } from "../wallet/balances.js";
-import { inspectVersionedTransaction } from "../util/tx-inspect.js";
+import { inspectInstructions } from "../util/tx-inspect.js";
 import {
   assertTransactionSize,
   fitsTransactionSize,
@@ -52,7 +49,11 @@ import {
   TX_TOO_LARGE_HINT,
 } from "../util/transaction-size.js";
 import { logError } from "../util/log-error.js";
-import { getAddressLookupTables } from "../solana/alt.js";
+import {
+  compileV1Transaction,
+  DEFAULT_LOADED_ACCOUNTS_DATA_SIZE_LIMIT,
+} from "../solana/tx-v1.js";
+import { priorityFeeLamportsForTier } from "../sponsor/fees.js";
 import {
   blockhashContextToExpiry,
   fetchBlockhashContext,
@@ -81,12 +82,12 @@ async function runBuildPhase<T>(
   }
 }
 
-function priorityIxs(config: AppConfig, tier: PriorityTier): TransactionInstruction[] {
-  const { microLamports, computeUnitLimit } = config.priorityFee[tier];
-  return [
-    ComputeBudgetProgram.setComputeUnitLimit({ units: computeUnitLimit }),
-    ComputeBudgetProgram.setComputeUnitPrice({ microLamports }),
-  ];
+function v1ResourceConfig(config: AppConfig, tier: PriorityTier) {
+  return {
+    computeUnitLimit: config.priorityFee[tier].computeUnitLimit,
+    loadedAccountsDataSizeLimit: DEFAULT_LOADED_ACCOUNTS_DATA_SIZE_LIMIT,
+    priorityFeeLamports: priorityFeeLamportsForTier(config, tier),
+  };
 }
 
 export type BuildTradeParams = BuildTxRequest & {
@@ -150,42 +151,40 @@ async function finalizeTx(
   framePubkey: string,
   sponsor: SponsorPlan,
   smartCloseIxs: TransactionInstruction[] = [],
-  blockhashCtx?: BlockhashContext
+  blockhashCtx: BlockhashContext | undefined,
+  priorityTier: PriorityTier
 ): Promise<BuildTxResponse> {
   const ctx =
     blockhashCtx ?? (await fetchBlockhashContext(pump.connection));
   const { blockhash, lastValidBlockHeight } = ctx;
 
   const feePayer = sponsor.active ? sponsor.pubkey : user;
+  const resourceConfig = v1ResourceConfig(config, priorityTier);
 
-  const lookupTables = await getAddressLookupTables(
-    pump.connection,
-    config.solana.addressLookupTables,
-    config.rpcCacheTtlMs
-  );
-
-  const compile = (instructions: TransactionInstruction[]) => {
-    const message = new TransactionMessage({
-      payerKey: feePayer,
-      recentBlockhash: blockhash,
+  const compile = async (instructions: TransactionInstruction[]) => {
+    const compiled = await compileV1Transaction({
+      feePayer,
+      blockhash,
+      lastValidBlockHeight,
       instructions,
-    }).compileToV0Message(lookupTables);
-    const versionedTx = new VersionedTransaction(message);
-    if (sponsor.active) {
-      if (!config.sponsor.keypairPath) {
-        throw new Error("sponsor.keypairPath required when sponsor is active");
-      }
-      versionedTx.sign([loadKeypairFromFile(config.sponsor.keypairPath)]);
-    }
-    const serialized = versionedTx.serialize();
-    return { versionedTx, serialized };
+      config: resourceConfig,
+      sponsorSecretKey: sponsor.active
+        ? (() => {
+            if (!config.sponsor.keypairPath) {
+              throw new Error("sponsor.keypairPath required when sponsor is active");
+            }
+            return loadKeypairFromFile(config.sponsor.keypairPath).secretKey;
+          })()
+        : undefined,
+    });
+    return compiled;
   };
 
-  const tryCompile = (
+  const tryCompile = async (
     instructions: TransactionInstruction[]
-  ): { versionedTx: VersionedTransaction; serialized: Uint8Array } | null => {
+  ): Promise<Awaited<ReturnType<typeof compile>> | null> => {
     try {
-      return compile(instructions);
+      return await compile(instructions);
     } catch (err) {
       if (isTxCompileSizeError(err)) return null;
       throw err;
@@ -197,46 +196,49 @@ async function finalizeTx(
 
   if (smartCloseIxs.length > 0) {
     const withClose = [...instructions, ...smartCloseIxs];
-    const attempt = tryCompile(withClose);
+    const attempt = await tryCompile(withClose);
     if (attempt && fitsTransactionSize(attempt.serialized)) {
       instructions = withClose;
       smartCloseApplied = true;
     }
   }
 
-  const compiled = tryCompile(instructions);
+  const compiled = await tryCompile(instructions);
   if (!compiled) {
     throw new Error(TX_TOO_LARGE_HINT);
   }
-  const { serialized, versionedTx } = compiled;
-  assertTransactionSize(serialized);
+  assertTransactionSize(compiled.serialized);
 
   let partiallySignedBy: string[] | undefined;
   if (sponsor.active) {
     partiallySignedBy = [sponsor.pubkey.toBase58()];
   }
 
-  const inspection = inspectVersionedTransaction(versionedTx, lookupTables, {
+  const inspection = inspectInstructions(instructions, {
     ifxProgramId: config.ifx.programId,
     frameUsed: framePubkey,
     feePayer: feePayer.toBase58(),
     smartCloseApplied,
-    transactionSizeBytes: serialized.length,
-    addressLookupTableAddresses: config.solana.addressLookupTables,
+    transactionSizeBytes: compiled.serialized.length,
+    transactionConfig: {
+      computeUnitLimit: resourceConfig.computeUnitLimit,
+      loadedAccountsDataSizeLimit: resourceConfig.loadedAccountsDataSizeLimit,
+      priorityFeeLamports: resourceConfig.priorityFeeLamports.toString(),
+    },
   });
 
   return {
-    transaction: Buffer.from(serialized).toString("base64"),
-    transactionVersion: 0,
+    transaction: compiled.base64,
+    transactionVersion: 1,
     recentBlockhash: blockhash,
     frameUsed: framePubkey,
     lastValidBlockHeight,
     feePayer: feePayer.toBase58(),
     signers: [user.toBase58()],
     partiallySignedBy,
-    addressLookupTables: config.solana.addressLookupTables,
+    addressLookupTables: [],
     smartCloseApplied,
-    transactionSizeBytes: serialized.length,
+    transactionSizeBytes: compiled.serialized.length,
     inspection,
   };
 }
@@ -245,7 +247,8 @@ async function buildSwapTransaction(
   pump: PumpContext,
   config: AppConfig,
   req: BuildTradeParams,
-  quote: QuoteResponse
+  quote: QuoteResponse,
+  sponsor: SponsorPlan
 ): Promise<BuildTxResponse> {
   if (!req.mintB) throw new Error("mintB required for swap mode");
 
@@ -270,7 +273,6 @@ async function buildSwapTransaction(
     config.ifx.programId
   );
   const tx = new Transaction();
-  tx.add(...priorityIxs(config, req.priorityTier));
   tx.add(scratch.ixReset());
 
   const swapIxs: TransactionInstruction[] = [];
@@ -285,6 +287,15 @@ async function buildSwapTransaction(
     hop2MinBaseOut: BigInt(quote.minOutputRaw),
     feeRecipient: new PublicKey(config.serviceFee.pubkey),
     serviceFeeBps: config.serviceFee.bps,
+    ...(sponsor.active
+      ? {
+          sponsor: {
+            pubkey: sponsor.pubkey,
+            txFeeLamports: sponsor.txFeeLamports,
+            repayBufferPercent: config.sponsor.repayBufferPercent,
+          },
+        }
+      : {}),
   });
   tx.add(...swapIxs);
 
@@ -322,9 +333,10 @@ async function buildSwapTransaction(
     user,
     tx,
     framePubkey,
-    inactiveSponsorPlan(config),
+    sponsor,
     smartCloseIxs,
-    req.blockhashCtx
+    req.blockhashCtx,
+    req.priorityTier
   );
 }
 
@@ -345,7 +357,6 @@ async function buildSingleHopTransaction(
   );
 
   const tx = new Transaction();
-  tx.add(...priorityIxs(config, req.priorityTier));
   tx.add(scratch.ixReset());
 
   const baseAta = userBaseAta(
@@ -444,7 +455,8 @@ async function buildSingleHopTransaction(
       framePubkey,
       sponsor,
       smartCloseIxs,
-      req.blockhashCtx
+      req.blockhashCtx,
+      req.priorityTier
     );
   }
 
@@ -456,7 +468,8 @@ async function buildSingleHopTransaction(
     framePubkey,
     sponsor,
     [],
-    req.blockhashCtx
+    req.blockhashCtx,
+    req.priorityTier
   );
 }
 
@@ -525,37 +538,32 @@ export async function buildTradeTransaction(
 
   const slippageBps = req.slippageBps ?? config.quote.defaultSlippageBps;
   let sponsor: SponsorPlan = inactiveSponsorPlan(config);
-  if (req.mode === "trade" && side === "sell") {
-    if (req.userPubkey) {
-      const decision = await runBuildPhase(
-        "resolveSponsorDecision",
-        () =>
-          resolveSponsorDecision(pump.connection, config, {
-            mode: req.mode,
-            side,
-            quote,
-            slippageBps,
-            priorityTier: req.priorityTier,
-            user,
-            walletSolRaw: BigInt(wallet.solRaw),
-            bootstrapSpecs,
-            useSponsorRequest: req.useSponsor,
-          }),
-        { ...buildCtx, useSponsor: req.useSponsor }
-      );
-      sponsor = decision.plan;
-    }
+  const sponsorEligible =
+    (req.mode === "trade" && side === "sell") || req.mode === "swap";
+  if (sponsorEligible && req.userPubkey) {
+    const decision = await runBuildPhase(
+      "resolveSponsorDecision",
+      () =>
+        resolveSponsorDecision(pump.connection, config, {
+          mode: req.mode,
+          side,
+          quote,
+          slippageBps,
+          priorityTier: req.priorityTier,
+          user,
+          walletSolRaw: BigInt(wallet.solRaw),
+          bootstrapSpecs,
+          useSponsorRequest: req.useSponsor,
+        }),
+      { ...buildCtx, useSponsor: req.useSponsor }
+    );
+    sponsor = decision.plan;
   }
 
   if (req.mode === "swap") {
-    if (req.useSponsor) {
-      throw new Error(
-        "Sponsored gas is not available for swaps — you pay gas and rent"
-      );
-    }
     return runBuildPhase(
       "assembleSwapTx",
-      () => buildSwapTransaction(pump, config, req, quote),
+      () => buildSwapTransaction(pump, config, req, quote, sponsor),
       buildCtx
     );
   }

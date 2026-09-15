@@ -267,6 +267,16 @@ function validateConfig(cfg: AppConfig): void {
     throw new Error(`invalid priorityFee.defaultTier: ${tier as string}`);
   }
 
+  if (
+    !Number.isInteger(cfg.serviceFee.bps) ||
+    cfg.serviceFee.bps < 0 ||
+    cfg.serviceFee.bps > 65_535
+  ) {
+    throw new Error(
+      `serviceFee.bps must be an integer in 0..=65535 (got ${cfg.serviceFee.bps})`
+    );
+  }
+
   if (cfg.serviceFee.bps > 0 && !isValidPubkey(cfg.serviceFee.pubkey)) {
     throw new Error(
       "serviceFee.pubkey must be a valid base58 pubkey when serviceFee.bps > 0"

@@ -35,7 +35,7 @@ export function isSponsorEligibleRoute(
   quoteLabel: QuoteLabel
 ): boolean {
   if (!config.sponsor.enabled || quoteLabel !== "SOL") return false;
-  if (mode === "swap") return false;
+  if (mode === "swap") return true;
   return side === "sell";
 }
 
@@ -49,22 +49,6 @@ export function sponsorUiForBuy(config: AppConfig, quoteLabel: QuoteLabel): Spon
     enabled: false,
     readonly: true,
     hint: "Sponsored gas is not available for buys — you pay gas and rent",
-  };
-}
-
-export function sponsorUiForSwap(
-  config: AppConfig,
-  quoteLabel: QuoteLabel
-): SponsorUiState {
-  if (!config.sponsor.enabled || quoteLabel !== "SOL") {
-    return { visible: false, mode: "hidden", enabled: false, readonly: true };
-  }
-  return {
-    visible: true,
-    mode: "readonly_off",
-    enabled: false,
-    readonly: true,
-    hint: "Sponsored gas is not available for swaps — you pay gas and rent",
   };
 }
 

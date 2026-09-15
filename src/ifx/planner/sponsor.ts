@@ -88,6 +88,32 @@ export function appendSponsorAtaBootstrap(
   return { ataCost: total };
 }
 
+/** Binding for patched SOL repay: (on-chain ataCost + tx fee) × buffer. */
+export function appendSponsorRepayAmount(
+  scratch: FrameScratch,
+  out: TransactionInstruction[],
+  opts: {
+    txFeeLamports: bigint;
+    repayBufferPercent: number;
+    ataCost?: U64Binding;
+  }
+): U64Binding {
+  const repayBatch = scratch.letBuilder();
+  const base = opts.ataCost
+    ? repayBatch.letEval(
+        expr.add(opts.ataCost, expr.u64(opts.txFeeLamports))
+      )
+    : repayBatch.letEval(expr.u64(opts.txFeeLamports));
+  const repay = repayBatch.letEval(
+    expr.div(
+      expr.mul(base, expr.u64(100 + opts.repayBufferPercent)),
+      expr.u64(100)
+    )
+  );
+  out.push(repayBatch.buildIx());
+  return repay;
+}
+
 /** Patched SOL repay: (on-chain ataCost + tx fee) × buffer. */
 export function appendSponsorRepay(
   scratch: FrameScratch,
@@ -102,19 +128,7 @@ export function appendSponsorRepay(
     proceeds?: { quoteDelta: U64Binding; serviceFee?: U64Binding };
   }
 ): void {
-  const repayBatch = scratch.letBuilder();
-  const base = opts.ataCost
-    ? repayBatch.letEval(
-        expr.add(opts.ataCost, expr.u64(opts.txFeeLamports))
-      )
-    : repayBatch.letEval(expr.u64(opts.txFeeLamports));
-  const repay = repayBatch.letEval(
-    expr.div(
-      expr.mul(base, expr.u64(100 + opts.repayBufferPercent)),
-      expr.u64(100)
-    )
-  );
-  out.push(repayBatch.buildIx());
+  const repay = appendSponsorRepayAmount(scratch, out, opts);
 
   if (opts.proceeds) {
     appendProceedsCoverRepayAssert(
