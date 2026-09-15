@@ -33,6 +33,18 @@ function num(v: unknown): number | undefined {
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
 }
 
+function parseTxVersion(v: unknown): 0 | 1 | undefined {
+  if (v === 0 || v === 0n || v === "0" || v === "v0") return 0;
+  if (v === 1 || v === 1n || v === "1" || v === "v1") return 1;
+  return undefined;
+}
+
+function parseEnableTxV1(v: unknown): 0 | 1 | undefined {
+  if (v === true || v === "true" || v === "1") return 1;
+  if (v === false || v === "false" || v === "0") return 0;
+  return undefined;
+}
+
 type PriorityFeeTierPartial = {
   microLamports: number;
   computeUnitLimit: number;
@@ -72,6 +84,11 @@ function readTomlConfig(path: string): Partial<AppConfig> {
       solana.addressLookupTables ??
       solana.address_lookup_tables ??
       solana.alts;
+    const transactionVersion =
+      parseTxVersion(solana.transactionVersion ?? solana.transaction_version) ??
+      parseEnableTxV1(
+        solana.enableTxV1 ?? solana.enable_tx_v1 ?? solana.useTxV1 ?? solana.use_tx_v1
+      );
     partial.solana = {
       rpcUrl: str(solana.rpcUrl ?? solana.url ?? solana.rpc_url) ?? "",
       commitment:
@@ -79,7 +96,8 @@ function readTomlConfig(path: string): Partial<AppConfig> {
       addressLookupTables: Array.isArray(alts)
         ? alts.filter((a): a is string => typeof a === "string" && a.length > 0)
         : [],
-    };
+      ...(transactionVersion !== undefined ? { transactionVersion } : {}),
+    } as AppConfig["solana"];
   }
 
   if (ifx) {
@@ -189,6 +207,7 @@ export function defaultConfig(): AppConfig {
     solana: {
       rpcUrl: "https://api.mainnet-beta.solana.com",
       commitment: "confirmed",
+      transactionVersion: 0,
       addressLookupTables: [],
     },
     ifx: {
@@ -297,6 +316,15 @@ function validateConfig(cfg: AppConfig): void {
     );
   }
 
+  if (
+    cfg.solana.transactionVersion !== 0 &&
+    cfg.solana.transactionVersion !== 1
+  ) {
+    throw new Error(
+      `solana.transactionVersion must be 0 or 1 (got ${String(cfg.solana.transactionVersion)})`
+    );
+  }
+
   for (const alt of cfg.solana.addressLookupTables) {
     if (!isValidPubkey(alt)) {
       throw new Error(`solana.addressLookupTables contains invalid pubkey: ${alt}`);
@@ -317,6 +345,11 @@ export function loadConfig(): AppConfig {
 
   const rpcUrl = envStr("IFX_PUMPFUN_RPC_URL");
   if (rpcUrl) cfg.solana.rpcUrl = rpcUrl;
+
+  const txVersion =
+    parseTxVersion(envStr("IFX_PUMPFUN_TX_VERSION")) ??
+    parseEnableTxV1(envStr("IFX_PUMPFUN_ENABLE_TX_V1"));
+  if (txVersion !== undefined) cfg.solana.transactionVersion = txVersion;
 
   const port = envInt("IFX_PUMPFUN_PORT");
   if (port !== undefined) cfg.server.port = port;

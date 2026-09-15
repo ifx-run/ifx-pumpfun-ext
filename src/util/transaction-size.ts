@@ -1,13 +1,24 @@
 import { MAX_V1_TRANSACTION_SIZE } from "../solana/tx-v1.js";
+import type { SolanaTxVersion } from "../config/types.js";
 
-/** Maximum serialized v1 transaction size accepted by Solana validators (bytes). */
-export const MAX_TRANSACTION_SIZE = MAX_V1_TRANSACTION_SIZE;
+/** Maximum serialized v0/legacy packet size accepted by Solana validators (bytes). */
+export const MAX_V0_TRANSACTION_SIZE = 1232;
 
-export const TX_TOO_LARGE_HINT =
-  "Transaction exceeds Solana's 4096-byte v1 limit — drop optional instructions or split the route.";
+export function maxTransactionSize(version: SolanaTxVersion): number {
+  return version === 1 ? MAX_V1_TRANSACTION_SIZE : MAX_V0_TRANSACTION_SIZE;
+}
 
-export function fitsTransactionSize(serialized: Buffer | Uint8Array): boolean {
-  return serialized.length <= MAX_TRANSACTION_SIZE;
+export function txTooLargeHint(version: SolanaTxVersion): string {
+  return version === 1
+    ? "Transaction exceeds Solana's 4096-byte v1 limit — drop optional instructions or split the route."
+    : "Transaction exceeds Solana's 1232-byte packet limit — drop optional instructions or add an ALT.";
+}
+
+export function fitsTransactionSize(
+  serialized: Buffer | Uint8Array,
+  version: SolanaTxVersion
+): boolean {
+  return serialized.length <= maxTransactionSize(version);
 }
 
 /** Compile/serialize throws this when the message buffer would overflow. */
@@ -24,13 +35,15 @@ export function isTxCompileSizeError(err: unknown): boolean {
 
 export function assertTransactionSize(
   serialized: Buffer | Uint8Array,
+  version: SolanaTxVersion,
   context?: string
 ): void {
   const size = serialized.length;
-  if (size > MAX_TRANSACTION_SIZE) {
+  const limit = maxTransactionSize(version);
+  if (size > limit) {
     const prefix = context ? `${context}: ` : "";
     throw new Error(
-      `${prefix}transaction size ${size} bytes exceeds Solana limit of ${MAX_TRANSACTION_SIZE} bytes. ${TX_TOO_LARGE_HINT}`
+      `${prefix}transaction size ${size} bytes exceeds Solana limit of ${limit} bytes. ${txTooLargeHint(version)}`
     );
   }
 }

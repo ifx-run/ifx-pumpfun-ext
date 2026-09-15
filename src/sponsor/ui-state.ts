@@ -2,6 +2,7 @@ import type { Connection } from "@solana/web3.js";
 import { PublicKey } from "@solana/web3.js";
 
 import type { AppConfig, PriorityTier } from "../config/types.js";
+import { usesTxV1 } from "../config/types.js";
 import type {
   QuoteLabel,
   QuoteResponse,
@@ -35,7 +36,7 @@ export function isSponsorEligibleRoute(
   quoteLabel: QuoteLabel
 ): boolean {
   if (!config.sponsor.enabled || quoteLabel !== "SOL") return false;
-  if (mode === "swap") return true;
+  if (mode === "swap") return usesTxV1(config);
   return side === "sell";
 }
 

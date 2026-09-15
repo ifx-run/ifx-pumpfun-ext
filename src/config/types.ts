@@ -22,12 +22,19 @@ export type SponsorConfig = {
   repayBufferPercent: number;
 };
 
+export type SolanaTxVersion = 0 | 1;
+
 export type AppConfig = {
   server: { host: string; port: number };
   solana: {
     rpcUrl: string;
     commitment: "processed" | "confirmed" | "finalized";
-    /** Unused for v1 compiles (v1 has no ALTs). Kept so existing configs still load. */
+    /**
+     * 0 = v0 + ALTs (1232 B, ComputeBudget ixs). Default — wallets already sign this.
+     * 1 = SIMD-0385 v1 (4096 B, no ALTs, resource limits in message config).
+     */
+    transactionVersion: SolanaTxVersion;
+    /** Used only when transactionVersion is 0. Ignored for v1 compiles. */
     addressLookupTables: string[];
   };
   ifx: { programId: string; publicFrames: string[] };
@@ -43,3 +50,7 @@ export type AppConfig = {
   quote: { debounceMs: number; defaultSlippageBps: number };
   rpcCacheTtlMs: number;
 };
+
+export function usesTxV1(config: Pick<AppConfig, "solana">): boolean {
+  return config.solana.transactionVersion === 1;
+}

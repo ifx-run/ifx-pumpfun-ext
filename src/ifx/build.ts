@@ -1,10 +1,14 @@
 import {
+  ComputeBudgetProgram,
   PublicKey,
   Transaction,
   TransactionInstruction,
+  TransactionMessage,
+  VersionedTransaction,
 } from "@solana/web3.js";
 
 import type { AppConfig, PriorityTier } from "../config/types.js";
+import { usesTxV1 } from "../config/types.js";
 import { loadKeypairFromFile } from "../config/keypair.js";
 import {
   appendSwapInstructions,
@@ -36,23 +40,27 @@ import {
   inactiveSponsorPlan,
   type SponsorPlan,
 } from "../sponsor/plan.js";
-import { resolveSponsorDecision } from "../sponsor/ui-state.js";
+import { isSponsorEligibleRoute, resolveSponsorDecision } from "../sponsor/ui-state.js";
 import {
   computeInputLimit,
   fetchWalletBalances,
 } from "../wallet/balances.js";
-import { inspectInstructions } from "../util/tx-inspect.js";
+import {
+  inspectInstructions,
+  inspectVersionedTransaction,
+} from "../util/tx-inspect.js";
 import {
   assertTransactionSize,
   fitsTransactionSize,
   isTxCompileSizeError,
-  TX_TOO_LARGE_HINT,
+  txTooLargeHint,
 } from "../util/transaction-size.js";
 import { logError } from "../util/log-error.js";
 import {
   compileV1Transaction,
   DEFAULT_LOADED_ACCOUNTS_DATA_SIZE_LIMIT,
 } from "../solana/tx-v1.js";
+import { getAddressLookupTables } from "../solana/alt.js";
 import { priorityFeeLamportsForTier } from "../sponsor/fees.js";
 import {
   blockhashContextToExpiry,
@@ -88,6 +96,26 @@ function v1ResourceConfig(config: AppConfig, tier: PriorityTier) {
     loadedAccountsDataSizeLimit: DEFAULT_LOADED_ACCOUNTS_DATA_SIZE_LIMIT,
     priorityFeeLamports: priorityFeeLamportsForTier(config, tier),
   };
+}
+
+function priorityIxs(config: AppConfig, tier: PriorityTier): TransactionInstruction[] {
+  const { microLamports, computeUnitLimit } = config.priorityFee[tier];
+  return [
+    ComputeBudgetProgram.setComputeUnitLimit({ units: computeUnitLimit }),
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports }),
+  ];
+}
+
+/** v0 needs ComputeBudget ixs; v1 puts the same limits in message transactionConfig. */
+function resourceIxs(config: AppConfig, tier: PriorityTier): TransactionInstruction[] {
+  return usesTxV1(config) ? [] : priorityIxs(config, tier);
+}
+
+function sponsorSecretKey(config: AppConfig): Uint8Array {
+  if (!config.sponsor.keypairPath) {
+    throw new Error("sponsor.keypairPath required when sponsor is active");
+  }
+  return loadKeypairFromFile(config.sponsor.keypairPath).secretKey;
 }
 
 export type BuildTradeParams = BuildTxRequest & {
@@ -143,14 +171,105 @@ async function resolveQuoteForBuild(
   });
 }
 
-async function finalizeTx(
+async function finalizeTxV0(
   pump: PumpContext,
   config: AppConfig,
   user: PublicKey,
   tx: Transaction,
   framePubkey: string,
   sponsor: SponsorPlan,
-  smartCloseIxs: TransactionInstruction[] = [],
+  smartCloseIxs: TransactionInstruction[],
+  blockhashCtx: BlockhashContext | undefined
+): Promise<BuildTxResponse> {
+  const ctx =
+    blockhashCtx ?? (await fetchBlockhashContext(pump.connection));
+  const { blockhash, lastValidBlockHeight } = ctx;
+  const feePayer = sponsor.active ? sponsor.pubkey : user;
+
+  const lookupTables = await getAddressLookupTables(
+    pump.connection,
+    config.solana.addressLookupTables,
+    config.rpcCacheTtlMs
+  );
+
+  const compile = (instructions: TransactionInstruction[]) => {
+    const message = new TransactionMessage({
+      payerKey: feePayer,
+      recentBlockhash: blockhash,
+      instructions,
+    }).compileToV0Message(lookupTables);
+    const versionedTx = new VersionedTransaction(message);
+    if (sponsor.active) {
+      if (!config.sponsor.keypairPath) {
+        throw new Error("sponsor.keypairPath required when sponsor is active");
+      }
+      versionedTx.sign([loadKeypairFromFile(config.sponsor.keypairPath)]);
+    }
+    const serialized = versionedTx.serialize();
+    return { versionedTx, serialized };
+  };
+
+  const tryCompile = (
+    instructions: TransactionInstruction[]
+  ): { versionedTx: VersionedTransaction; serialized: Uint8Array } | null => {
+    try {
+      return compile(instructions);
+    } catch (err) {
+      if (isTxCompileSizeError(err)) return null;
+      throw err;
+    }
+  };
+
+  let instructions = tx.instructions;
+  let smartCloseApplied = false;
+
+  if (smartCloseIxs.length > 0) {
+    const withClose = [...instructions, ...smartCloseIxs];
+    const attempt = tryCompile(withClose);
+    if (attempt && fitsTransactionSize(attempt.serialized, 0)) {
+      instructions = withClose;
+      smartCloseApplied = true;
+    }
+  }
+
+  const compiled = tryCompile(instructions);
+  if (!compiled) {
+    throw new Error(txTooLargeHint(0));
+  }
+  const { serialized, versionedTx } = compiled;
+  assertTransactionSize(serialized, 0);
+
+  return {
+    transaction: Buffer.from(serialized).toString("base64"),
+    transactionVersion: 0,
+    recentBlockhash: blockhash,
+    frameUsed: framePubkey,
+    lastValidBlockHeight,
+    feePayer: feePayer.toBase58(),
+    signers: [user.toBase58()],
+    partiallySignedBy: sponsor.active ? [sponsor.pubkey.toBase58()] : undefined,
+    addressLookupTables: config.solana.addressLookupTables,
+    smartCloseApplied,
+    transactionSizeBytes: serialized.length,
+    inspection: inspectVersionedTransaction(versionedTx, lookupTables, {
+      ifxProgramId: config.ifx.programId,
+      frameUsed: framePubkey,
+      feePayer: feePayer.toBase58(),
+      smartCloseApplied,
+      transactionSizeBytes: serialized.length,
+      addressLookupTableAddresses: config.solana.addressLookupTables,
+    }),
+  };
+}
+
+async function finalizeTxV1(
+  pump: PumpContext,
+  config: AppConfig,
+  user: PublicKey,
+  tx: Transaction,
+  framePubkey: string,
+  sponsor: SponsorPlan,
+  smartCloseIxs: TransactionInstruction[],
   blockhashCtx: BlockhashContext | undefined,
   priorityTier: PriorityTier
 ): Promise<BuildTxResponse> {
@@ -162,22 +281,14 @@ async function finalizeTx(
   const resourceConfig = v1ResourceConfig(config, priorityTier);
 
   const compile = async (instructions: TransactionInstruction[]) => {
-    const compiled = await compileV1Transaction({
+    return compileV1Transaction({
       feePayer,
       blockhash,
       lastValidBlockHeight,
       instructions,
       config: resourceConfig,
-      sponsorSecretKey: sponsor.active
-        ? (() => {
-            if (!config.sponsor.keypairPath) {
-              throw new Error("sponsor.keypairPath required when sponsor is active");
-            }
-            return loadKeypairFromFile(config.sponsor.keypairPath).secretKey;
-          })()
-        : undefined,
+      sponsorSecretKey: sponsor.active ? sponsorSecretKey(config) : undefined,
     });
-    return compiled;
   };
 
   const tryCompile = async (
@@ -197,7 +308,7 @@ async function finalizeTx(
   if (smartCloseIxs.length > 0) {
     const withClose = [...instructions, ...smartCloseIxs];
     const attempt = await tryCompile(withClose);
-    if (attempt && fitsTransactionSize(attempt.serialized)) {
+    if (attempt && fitsTransactionSize(attempt.serialized, 1)) {
       instructions = withClose;
       smartCloseApplied = true;
     }
@@ -205,27 +316,9 @@ async function finalizeTx(
 
   const compiled = await tryCompile(instructions);
   if (!compiled) {
-    throw new Error(TX_TOO_LARGE_HINT);
+    throw new Error(txTooLargeHint(1));
   }
-  assertTransactionSize(compiled.serialized);
-
-  let partiallySignedBy: string[] | undefined;
-  if (sponsor.active) {
-    partiallySignedBy = [sponsor.pubkey.toBase58()];
-  }
-
-  const inspection = inspectInstructions(instructions, {
-    ifxProgramId: config.ifx.programId,
-    frameUsed: framePubkey,
-    feePayer: feePayer.toBase58(),
-    smartCloseApplied,
-    transactionSizeBytes: compiled.serialized.length,
-    transactionConfig: {
-      computeUnitLimit: resourceConfig.computeUnitLimit,
-      loadedAccountsDataSizeLimit: resourceConfig.loadedAccountsDataSizeLimit,
-      priorityFeeLamports: resourceConfig.priorityFeeLamports.toString(),
-    },
-  });
+  assertTransactionSize(compiled.serialized, 1);
 
   return {
     transaction: compiled.base64,
@@ -235,12 +328,59 @@ async function finalizeTx(
     lastValidBlockHeight,
     feePayer: feePayer.toBase58(),
     signers: [user.toBase58()],
-    partiallySignedBy,
+    partiallySignedBy: sponsor.active ? [sponsor.pubkey.toBase58()] : undefined,
     addressLookupTables: [],
     smartCloseApplied,
     transactionSizeBytes: compiled.serialized.length,
-    inspection,
+    inspection: inspectInstructions(instructions, {
+      ifxProgramId: config.ifx.programId,
+      frameUsed: framePubkey,
+      feePayer: feePayer.toBase58(),
+      smartCloseApplied,
+      transactionSizeBytes: compiled.serialized.length,
+      transactionConfig: {
+        computeUnitLimit: resourceConfig.computeUnitLimit,
+        loadedAccountsDataSizeLimit: resourceConfig.loadedAccountsDataSizeLimit,
+        priorityFeeLamports: resourceConfig.priorityFeeLamports.toString(),
+      },
+    }),
   };
+}
+
+async function finalizeTx(
+  pump: PumpContext,
+  config: AppConfig,
+  user: PublicKey,
+  tx: Transaction,
+  framePubkey: string,
+  sponsor: SponsorPlan,
+  smartCloseIxs: TransactionInstruction[] = [],
+  blockhashCtx: BlockhashContext | undefined,
+  priorityTier: PriorityTier
+): Promise<BuildTxResponse> {
+  if (usesTxV1(config)) {
+    return finalizeTxV1(
+      pump,
+      config,
+      user,
+      tx,
+      framePubkey,
+      sponsor,
+      smartCloseIxs,
+      blockhashCtx,
+      priorityTier
+    );
+  }
+  return finalizeTxV0(
+    pump,
+    config,
+    user,
+    tx,
+    framePubkey,
+    sponsor,
+    smartCloseIxs,
+    blockhashCtx
+  );
 }
 
 async function buildSwapTransaction(
@@ -273,6 +413,7 @@ async function buildSwapTransaction(
     config.ifx.programId
   );
   const tx = new Transaction();
+  tx.add(...resourceIxs(config, req.priorityTier));
   tx.add(scratch.ixReset());
 
   const swapIxs: TransactionInstruction[] = [];
@@ -357,6 +498,7 @@ async function buildSingleHopTransaction(
   );
 
   const tx = new Transaction();
+  tx.add(...resourceIxs(config, req.priorityTier));
   tx.add(scratch.ixReset());
 
   const baseAta = userBaseAta(
@@ -538,9 +680,7 @@ export async function buildTradeTransaction(
 
   const slippageBps = req.slippageBps ?? config.quote.defaultSlippageBps;
   let sponsor: SponsorPlan = inactiveSponsorPlan(config);
-  const sponsorEligible =
-    (req.mode === "trade" && side === "sell") || req.mode === "swap";
-  if (sponsorEligible && req.userPubkey) {
+  if (isSponsorEligibleRoute(config, req.mode, side, quote.serviceFeeLabel) && req.userPubkey) {
     const decision = await runBuildPhase(
       "resolveSponsorDecision",
       () =>

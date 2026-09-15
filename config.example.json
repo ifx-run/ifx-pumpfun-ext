@@ -6,6 +6,7 @@
   "solana": {
     "rpcUrl": "https://api.mainnet-beta.solana.com",
     "commitment": "confirmed",
+    "transactionVersion": 0,
     "addressLookupTables": []
   },
   "ifx": {

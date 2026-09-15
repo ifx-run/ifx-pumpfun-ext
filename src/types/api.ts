@@ -133,6 +133,8 @@ export type PublicConfigResponse = {
   defaultPriorityTier: string;
   rpcUrl: string;
   addressLookupTableCount: number;
+  /** 0 = v0 + ALT; 1 = SIMD-0385 v1. */
+  transactionVersion: 0 | 1;
 };
 
 /** Frozen quote fields for build — avoids re-parsing decimals on build. */
@@ -155,8 +157,8 @@ export type BuildTxRequest = QuoteRequest & {
 
 export type BuildTxResponse = {
   transaction: string;
-  /** Always 1 — v0/legacy transactions are not returned. */
-  transactionVersion: 1;
+  /** 0 = v0 + ALT; 1 = SIMD-0385 v1. */
+  transactionVersion: 0 | 1;
   recentBlockhash: string;
   lastValidBlockHeight?: number;
   frameUsed?: string;
@@ -194,7 +196,7 @@ export type TxInstructionInspection = {
 };
 
 export type TxInspection = {
-  version: 1;
+  version: 0 | 1;
   numInstructions: number;
   staticAccountKeys: number;
   loadedWritableAccounts: number;

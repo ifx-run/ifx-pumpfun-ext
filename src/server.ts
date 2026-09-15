@@ -81,6 +81,7 @@ export async function buildApp() {
     defaultPriorityTier: config.priorityFee.defaultTier,
     rpcUrl: config.solana.rpcUrl,
     addressLookupTableCount: config.solana.addressLookupTables.length,
+    transactionVersion: config.solana.transactionVersion,
   }));
 
   app.post("/api/wallet/balances", async (req, reply) => {

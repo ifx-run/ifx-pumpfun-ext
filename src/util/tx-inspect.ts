@@ -1,5 +1,9 @@
 import { ifxIxHint } from "@ifx-run/sdk";
-import type { TransactionInstruction } from "@solana/web3.js";
+import type {
+  AddressLookupTableAccount,
+  TransactionInstruction,
+  VersionedTransaction,
+} from "@solana/web3.js";
 
 import type { TxInspection, TxInstructionInspection } from "../types/api.js";
 
@@ -167,5 +171,154 @@ export function inspectInstructions(
     transactionSizeBytes: opts?.transactionSizeBytes,
     transactionConfig: opts?.transactionConfig,
     instructions: inspected,
+  };
+}
+
+function accountMetaFlags(
+  keyIndex: number,
+  staticKeyCount: number,
+  loadedWritable: number,
+  header: {
+    numRequiredSignatures: number;
+    numReadonlySignedAccounts: number;
+    numReadonlyUnsignedAccounts: number;
+  }
+): { isSigner: boolean; isWritable: boolean } {
+  const {
+    numRequiredSignatures,
+    numReadonlySignedAccounts,
+    numReadonlyUnsignedAccounts,
+  } = header;
+
+  if (keyIndex < staticKeyCount) {
+    const isSigner = keyIndex < numRequiredSignatures;
+    if (isSigner) {
+      return {
+        isSigner: true,
+        isWritable: keyIndex < numRequiredSignatures - numReadonlySignedAccounts,
+      };
+    }
+    const unsignedIdx = keyIndex - numRequiredSignatures;
+    const numUnsigned = staticKeyCount - numRequiredSignatures;
+    return {
+      isSigner: false,
+      isWritable: unsignedIdx < numUnsigned - numReadonlyUnsignedAccounts,
+    };
+  }
+
+  const loadedIdx = keyIndex - staticKeyCount;
+  if (loadedIdx < loadedWritable) {
+    return { isSigner: false, isWritable: true };
+  }
+  return { isSigner: false, isWritable: false };
+}
+
+function accountKeyResolution(
+  keyIndex: number,
+  staticKeyCount: number,
+  loadedWritable: number
+): "alt-writable" | "alt-readonly" | "static" {
+  if (keyIndex < staticKeyCount) return "static";
+  const loadedIdx = keyIndex - staticKeyCount;
+  if (loadedIdx < loadedWritable) return "alt-writable";
+  return "alt-readonly";
+}
+
+function buildAltTableAddressSet(
+  lookupTables: AddressLookupTableAccount[]
+): Set<string> {
+  const set = new Set<string>();
+  for (const table of lookupTables) {
+    for (const addr of table.state.addresses) {
+      set.add(addr.toBase58());
+    }
+  }
+  return set;
+}
+
+/** Inspect a compiled v0 VersionedTransaction (static keys + ALT lookups). */
+export function inspectVersionedTransaction(
+  tx: VersionedTransaction,
+  lookupTables: AddressLookupTableAccount[],
+  opts?: {
+    ifxProgramId?: string;
+    frameUsed?: string;
+    feePayer?: string;
+    smartCloseApplied?: boolean;
+    transactionSizeBytes?: number;
+    addressLookupTableAddresses?: string[];
+  }
+): TxInspection {
+  const message = tx.message;
+  const accountKeys = message.getAccountKeys({
+    addressLookupTableAccounts: lookupTables,
+  });
+
+  const staticKeyCount = message.staticAccountKeys.length;
+  const loadedWritable = message.addressTableLookups.reduce(
+    (n, l) => n + l.writableIndexes.length,
+    0
+  );
+  const loadedReadonly = message.addressTableLookups.reduce(
+    (n, l) => n + l.readonlyIndexes.length,
+    0
+  );
+  const altTableAddresses = buildAltTableAddressSet(lookupTables);
+
+  const instructions: TxInstructionInspection[] = message.compiledInstructions.map(
+    (ix, index) => {
+      const programId = accountKeys.get(ix.programIdIndex)!.toBase58();
+      const data = Buffer.from(ix.data);
+      const accounts = ix.accountKeyIndexes.map((keyIndex) => {
+        const flags = accountMetaFlags(
+          keyIndex,
+          staticKeyCount,
+          loadedWritable,
+          message.header
+        );
+        const pubkey = accountKeys.get(keyIndex)!.toBase58();
+        const resolution = accountKeyResolution(
+          keyIndex,
+          staticKeyCount,
+          loadedWritable
+        );
+        const inAltTable = altTableAddresses.has(pubkey);
+        return {
+          index: keyIndex,
+          pubkey,
+          isSigner: flags.isSigner,
+          isWritable: flags.isWritable,
+          altLoaded: resolution !== "static",
+          resolution,
+          inAltTableUnused: resolution === "static" && inAltTable,
+        };
+      });
+
+      return {
+        index,
+        programId,
+        programLabel: programLabel(programId, opts?.ifxProgramId),
+        hint: decodeInstructionHint(programId, data, opts?.ifxProgramId),
+        accounts,
+        dataHex: data.toString("hex"),
+        dataBase64: data.toString("base64"),
+        dataLength: data.length,
+      };
+    }
+  );
+
+  return {
+    version: 0,
+    numInstructions: instructions.length,
+    staticAccountKeys: staticKeyCount,
+    loadedWritableAccounts: loadedWritable,
+    loadedReadonlyAccounts: loadedReadonly,
+    totalAccountKeys: accountKeys.length,
+    addressLookupTables: opts?.addressLookupTableAddresses ?? [],
+    frameUsed: opts?.frameUsed,
+    feePayer: opts?.feePayer,
+    smartCloseApplied: opts?.smartCloseApplied,
+    transactionSizeBytes: opts?.transactionSizeBytes,
+    instructions,
   };
 }

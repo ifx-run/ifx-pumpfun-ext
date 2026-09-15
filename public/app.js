@@ -1,4 +1,4 @@
-import { Connection } from "@solana/web3.js";
+import { Connection, VersionedTransaction } from "@solana/web3.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -786,19 +786,22 @@ async function fetchTxExecutionResult(connection, signature) {
 
 async function signAndSend(connection, built) {
   const bytes = decodeTxBase64(built.transaction);
-  const duck = { serialize: () => bytes };
+  const isV1 = built.transactionVersion === 1;
+  const arg = isV1
+    ? { serialize: () => bytes }
+    : VersionedTransaction.deserialize(bytes);
 
   let signature;
-  const sendWith = async (arg) => {
+  const sendWith = async (txArg) => {
     if (walletProvider.signAndSendTransaction) {
-      const result = await walletProvider.signAndSendTransaction(arg, {
+      const result = await walletProvider.signAndSendTransaction(txArg, {
         skipPreflight: false,
       });
       return typeof result === "string"
         ? result
         : result.signature?.toString?.() ?? String(result);
     }
-    const signed = await walletProvider.signTransaction(arg);
+    const signed = await walletProvider.signTransaction(txArg);
     const signedBytes =
       signed instanceof Uint8Array
         ? signed
@@ -812,9 +815,9 @@ async function signAndSend(connection, built) {
   };
 
   try {
-    signature = await sendWith(duck);
+    signature = await sendWith(arg);
   } catch (err) {
-    throw walletV1Error(err);
+    throw isV1 ? walletV1Error(err) : err;
   }
 
   await connection.confirmTransaction(
@@ -979,26 +982,36 @@ function renderTxInspector(inspection, statusText) {
         ? "applied"
         : "skipped (size)";
 
+  const isV1 = inspection.version === 1;
+  const sizeLimit = isV1 ? 4096 : 1232;
   const cfg = inspection.transactionConfig;
   const cfgHtml = cfg
     ? `<div class="meta-kv"><span>CU limit</span><code>${Number(cfg.computeUnitLimit).toLocaleString()}</code></div>
     <div class="meta-kv"><span>Priority fee</span><code>${cfg.priorityFeeLamports} lamports</code></div>
     <div class="meta-kv"><span>Loaded accounts</span><code>${Number(cfg.loadedAccountsDataSizeLimit).toLocaleString()} B</code></div>`
     : "";
+  const accountsHtml = isV1
+    ? `${inspection.totalAccountKeys} inline (v1, no ALT)`
+    : `${inspection.totalAccountKeys} (${inspection.staticAccountKeys} static + ${inspection.loadedWritableAccounts}W/${inspection.loadedReadonlyAccounts}R ALT)`;
+  const altHtml = isV1
+    ? ""
+    : `<div class="meta-kv"><span>ALTs</span><code>${inspection.addressLookupTables?.length ?? 0}</code></div>`;
 
   meta.innerHTML = `
     <div class="meta-kv"><span>Version</span><code>v${inspection.version}</code></div>
     <div class="meta-kv"><span>Instructions</span><code>${inspection.numInstructions}</code></div>
-    <div class="meta-kv"><span>Tx size</span><code>${inspection.transactionSizeBytes ?? "—"} B / 4096</code></div>
-    <div class="meta-kv"><span>Account keys</span><code>${inspection.totalAccountKeys} inline (v1, no ALT)</code></div>
+    <div class="meta-kv"><span>Tx size</span><code>${inspection.transactionSizeBytes ?? "—"} B / ${sizeLimit}</code></div>
+    <div class="meta-kv"><span>Account keys</span><code>${accountsHtml}</code></div>
     ${cfgHtml}
     <div class="meta-kv"><span>Frame</span><code>${inspection.frameUsed ?? "—"}</code></div>
     <div class="meta-kv"><span>Fee payer</span><code>${inspection.feePayer ?? "—"}</code></div>
     <div class="meta-kv"><span>Smart close</span><code>${smartClose}</code></div>
+    ${altHtml}
   `;
 
-  status.title =
-    "v1 transactions carry resource limits in the message config (not ComputeBudget instructions) and inline every account — ALTs are not used.";
+  status.title = isV1
+    ? "v1 transactions carry resource limits in the message config (not ComputeBudget instructions) and inline every account — ALTs are not used."
+    : "Resolve: ALT = loaded via lookup table (size win). static = full pubkey in message. static† = in ALT table but static (signers must stay static).";
 
   list.innerHTML = inspection.instructions
     .map(

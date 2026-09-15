@@ -7,7 +7,9 @@ port = 8787
 [solana]
 rpc_url = "https://api.mainnet-beta.solana.com"
 commitment = "confirmed"
-# On-chain address lookup tables — every build compiles a v0 tx with these ALTs.
+# 0 = v0 + ALT (1232 B, current wallets). 1 = Solana tx v1 (4096 B, no ALTs).
+transaction_version = 0
+# On-chain address lookup tables — used only when transaction_version = 0.
 address_lookup_tables = [
   # "YourAltPubkey...",
 ]
